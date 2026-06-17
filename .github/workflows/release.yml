@@ -1,0 +1,76 @@
+name: Build & Release APK
+
+# Builds a release APK and publishes it as a GitHub Release.
+# Triggered by pushing a version tag (e.g. `v1.0.0`), or run manually from the
+# Actions tab. The release is published by the github-actions bot.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to create (e.g. v0.0.1)'
+        required: true
+        default: 'v0.0.1'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.1
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build release APK
+        run: flutter build apk --release
+
+      - name: Stage APK
+        run: |
+          mkdir -p dist
+          cp build/app/outputs/flutter-apk/app-release.apk \
+             "dist/entegram-${{ steps.meta.outputs.tag }}.apk"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: Entegram ${{ steps.meta.outputs.tag }}
+          files: dist/*.apk
+          fail_on_unmatched_files: true
+          body: |
+            Instagram-style memories feed & stories viewer for Ente Photos.
+
+            **Install:** download the `.apk` below onto an Android device and open
+            it (you may need to allow "install from unknown sources").
+
+            > This build is signed with Flutter's debug key, not a production
+            > release key — fine for personal/sideload use. Uninstall any prior
+            > debug-signed build first if Android refuses to update in place.
