@@ -252,8 +252,6 @@ Future<Person> decryptPerson(
       cipher: cipher, key: entityKey, header: header,
     );
   }
-  debugPrint('[sync] person ${person.remoteID}: name="${data['name']}" '
-      'clusters=${(data['assigned'] as List?)?.length ?? 0}');
 
   person
     ..name = data['name'] as String?

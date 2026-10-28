@@ -23,6 +23,7 @@ class CryptoIsolate {
 
   final _pending = <int, Completer<Object?>>{};
   var _nextId = 0;
+  bool _disposed = false;
 
   /// Spawns the worker, ships it the session keys, and completes once it has
   /// initialised libsodium and is ready to serve requests.
@@ -73,6 +74,7 @@ class CryptoIsolate {
   }
 
   Future<Object?> _send(_Request request) {
+    if (_disposed) return Future.error(StateError('Crypto worker stopped'));
     final id = _nextId++;
     final completer = Completer<Object?>();
     _pending[id] = completer;
@@ -135,17 +137,16 @@ class CryptoIsolate {
     required String fileHeaderB64,
     required String inputPath,
     required String outputPath,
-  }) async =>
-      _send(
-        _DecryptFileToDisk(
-          collectionID,
-          encryptedFileKeyB64,
-          keyNonceB64,
-          fileHeaderB64,
-          inputPath,
-          outputPath,
-        ),
-      );
+  }) async => _send(
+    _DecryptFileToDisk(
+      collectionID,
+      encryptedFileKeyB64,
+      keyNonceB64,
+      fileHeaderB64,
+      inputPath,
+      outputPath,
+    ),
+  );
 
   /// Downloads-then-decrypts happens caller-side; this decrypts the bytes using
   /// the cached collection key for [collectionID].
@@ -168,6 +169,12 @@ class CryptoIsolate {
           as Uint8List;
 
   void dispose() {
+    if (_disposed) return;
+    _disposed = true;
+    for (final pending in _pending.values) {
+      pending.completeError(StateError('Crypto worker stopped'));
+    }
+    _pending.clear();
     _isolate.kill(priority: Isolate.immediate);
     _fromWorker.close();
   }

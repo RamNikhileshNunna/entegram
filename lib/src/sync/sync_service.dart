@@ -1,6 +1,6 @@
 import 'package:dio/dio.dart';
-import 'package:flutter/foundation.dart';
 import 'package:isar_community/isar.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../db/isar_db.dart';
 import '../db/models/ente_collection.dart';
@@ -9,224 +9,303 @@ import '../db/models/person.dart';
 import '../network/ente_api.dart';
 import 'crypto_isolate.dart';
 
-/// Result of advancing the file pagination by one page.
 class SyncProgress {
-  const SyncProgress({required this.insertedFiles, required this.hasMore});
+  const SyncProgress({
+    required this.insertedFiles,
+    required this.hasMore,
+    this.deletedFiles = 0,
+  });
   final int insertedFiles;
+  final int deletedFiles;
   final bool hasMore;
+  int get changedFiles => insertedFiles + deletedFiles;
 }
 
-/// Per-collection pagination cursor.
 class _FilesCursor {
-  _FilesCursor(this.collectionID, this.sinceTime);
+  _FilesCursor(this.collectionID, this.sinceTime, {this.persist = false});
   final int collectionID;
+  final bool persist;
   int sinceTime;
   bool done = false;
 }
 
-/// Orchestrates the data pipeline:
-///   network fetch (async IO, here) → libsodium decrypt (in [CryptoIsolate])
-///   → Isar write (here, single writer).
-///
-/// The UI never calls this for data — it watches Isar. The UI only *triggers*
-/// [syncNextFilesPage] when the feed nears its end.
+/// Backfill progress is independent from recent-priority inserts. Taking MAX
+/// of local file timestamps here loses the unsynced archive after a restart.
 class SyncService {
   SyncService({
     required EnteApi api,
     required IsarDb db,
     required CryptoIsolate crypto,
+    required SharedPreferences preferences,
+    required String cursorNamespace,
   }) : _api = api,
        _db = db,
-       _crypto = crypto;
-
+       _crypto = crypto,
+       _preferences = preferences,
+       _namespace = cursorNamespace;
   final EnteApi _api;
   final IsarDb _db;
   final CryptoIsolate _crypto;
-
+  final SharedPreferences _preferences;
+  final String _namespace;
   Isar get _isar => _db.isar;
+  final _cursors = <_FilesCursor>[];
+  final _recent = <_FilesCursor>[];
+  int _round = 0;
+  bool _reconciled = false;
+  String _cursorKey(int id) => 'files_cursor_v3:$_namespace:$id';
 
-  final List<_FilesCursor> _cursors = [];
-  int _cursorIndex = 0;
-
-  // One-shot cursors used during bootstrap to fetch the last year of files
-  // before the historical crawl catches up — ensures recent memories appear
-  // in the feed immediately rather than after many loadMore() calls.
-  final List<_FilesCursor> _recentCursors = [];
-
-  /// Pulls the collections diff, decrypts it, persists it, and (re)builds the
-  /// ordered set of file-pagination cursors — most-recently-updated first, so
-  /// the feed surfaces fresh memories near the top.
   Future<void> syncCollections() async {
-    final sinceTime = await _maxUpdationTime();
-    final raw = await _api.collections(sinceTime: sinceTime);
+    final since =
+        await _isar.enteCollections
+            .where()
+            .sortByUpdationTimeDesc()
+            .updationTimeProperty()
+            .findFirst() ??
+        0;
+    final raw = await _api.collections(sinceTime: since);
     if (raw.isNotEmpty) {
       final collections = await _crypto.decryptCollections(raw);
-      await _isar.writeTxn(() => _isar.enteCollections.putAll(collections));
+      await _isar.writeTxn(() async {
+        await _isar.enteCollections.putAll(collections);
+        final removed = collections
+            .where((c) => c.isDeleted)
+            .map((c) => c.collectionID)
+            .toSet();
+        if (removed.isNotEmpty) {
+          for (final file in await _isar.enteFiles.where().findAll()) {
+            if (file.collectionKeys.isEmpty) {
+              if (removed.contains(file.collectionID)) {
+                await _isar.enteFiles.delete(file.id);
+              }
+            } else if (file.collectionKeys.any(
+              (k) => removed.contains(k.collectionID),
+            )) {
+              file.collectionKeys = file.collectionKeys
+                  .where((k) => !removed.contains(k.collectionID))
+                  .toList();
+              await _retainLinkedFile(file);
+            }
+          }
+        }
+      });
     }
-
-    final owned = await _isar.enteCollections
+    final collections = await _isar.enteCollections
         .filter()
         .isDeletedEqualTo(false)
         .sortByUpdationTimeDesc()
         .findAll();
-
     _cursors.clear();
-    _cursorIndex = 0;
-    for (final c in owned) {
-      final since = await _isar.enteFiles
-          .where()
-          .collectionIDEqualTo(c.collectionID)
-          .sortByUpdationTimeDesc()
-          .updationTimeProperty()
-          .findFirst() ?? 0;
-      _cursors.add(_FilesCursor(c.collectionID, since));
-    }
-
-    // Bootstrap priority: populate one-shot cursors starting from one year ago
-    // so recent photos appear in the feed immediately instead of after many
-    // historical pages.
-    _recentCursors.clear();
-    final oneYearAgo = DateTime.now()
+    _recent.clear();
+    _round = 0;
+    _reconciled = false;
+    final recentStart = DateTime.now()
         .subtract(const Duration(days: 365))
         .microsecondsSinceEpoch;
-    for (final c in _cursors) {
-      if (c.sinceTime < oneYearAgo) {
-        _recentCursors.add(_FilesCursor(c.collectionID, oneYearAgo));
+    for (final c in collections) {
+      final since = _preferences.getInt(_cursorKey(c.collectionID)) ?? 0;
+      _cursors.add(_FilesCursor(c.collectionID, since, persist: true));
+      if (since < recentStart) {
+        _recent.add(_FilesCursor(c.collectionID, recentStart));
       }
     }
   }
 
-  /// Advances pagination by exactly one diff page across the collection
-  /// cursors. This is the call the scroll controller triggers near the bottom.
-  Future<SyncProgress> syncNextFilesPage() async {
-    final cursor = _nextPendingCursor();
+  Future<SyncProgress> syncNextFilesPage({bool prioritizeRecent = true}) async {
+    final cursor =
+        (prioritizeRecent ? _pending(_recent) : null) ?? _pending(_cursors);
     if (cursor == null) {
-      return const SyncProgress(insertedFiles: 0, hasMore: false);
-    }
-
-    final page = await _api.collectionDiff(
-      collectionID: cursor.collectionID,
-      sinceTime: cursor.sinceTime,
-    );
-
-    var inserted = 0;
-    if (page.items.isNotEmpty) {
-      final files = await _crypto.decryptFiles(
-        cursor.collectionID,
-        page.items,
+      final removed = await _finishBackfill();
+      return SyncProgress(
+        insertedFiles: 0,
+        deletedFiles: removed,
+        hasMore: false,
       );
-      await _isar.writeTxn(() async {
-        final live = files.where((f) => !f.isDeleted).toList();
-        final dead = files.where((f) => f.isDeleted).map((f) => f.id).toList();
-        await _isar.enteFiles.putAll(live);
-        if (dead.isNotEmpty) await _isar.enteFiles.deleteAll(dead);
-      });
-      inserted = files.where((f) => !f.isDeleted).length;
-      cursor.sinceTime = files
-          .map((f) => f.updationTime)
-          .fold<int>(cursor.sinceTime, (a, b) => b > a ? b : a);
     }
-
-    if (!page.hasMore) cursor.done = true;
-    return SyncProgress(insertedFiles: inserted, hasMore: _hasPendingWork());
+    return _syncPage(cursor);
   }
 
-  /// Syncs `person` entities (the ML face groups) so memories can be titled.
-  ///
-  /// People are optional: an account that has never run face recognition has no
-  /// person entity key, so `GET /user-entity/key?type=person` returns 404. That
-  /// (and any other person-sync failure) is non-fatal — we just skip people and
-  /// let the feed fall back to time-based memories.
-  Future<int> syncPersons() async {
-    final Map<String, dynamic> keyJson;
-    try {
-      keyJson = await _api.entityKey('cgroup');
-    } on DioException catch (e) {
-      if (e.response?.statusCode == 404) {
-        debugPrint('[sync] no person entity key (account has no ML data)');
-        return 0;
-      }
-      rethrow;
-    }
-    await _crypto.loadEntityKey(keyJson);
-
-    final sinceTime = await _isar.persons
-        .where()
-        .sortByUpdationTimeDesc()
-        .updationTimeProperty()
-        .findFirst();
-
-    final raw = await _api.entityDiff(type: 'cgroup', sinceTime: sinceTime ?? 0);
-    if (raw.isEmpty) return 0;
-
-    final persons = await _crypto.decryptPersons(raw);
-    await _isar.writeTxn(() async {
-      final live = persons.where((p) => !p.isDeleted).toList();
-      await _isar.persons.putAll(live);
-      final deadIds = persons
-          .where((p) => p.isDeleted)
-          .map((p) => p.remoteID)
-          .toList();
-      if (deadIds.isNotEmpty) {
-        await _isar.persons.deleteAllByRemoteID(deadIds);
-      }
-    });
-    return persons.length;
-  }
-
-  /// Exhausts all recent-window cursors, fetching every page of files from the
-  /// last year across all collections. Called once during bootstrap so 2025+
-  /// photos land in Isar before the historical crawl reaches them.
-  Future<SyncProgress> syncRecentFiles() async {
-    var inserted = 0;
-    for (final cursor in _recentCursors) {
-      while (!cursor.done) {
-        final page = await _api.collectionDiff(
-          collectionID: cursor.collectionID,
-          sinceTime: cursor.sinceTime,
-        );
-        if (page.items.isNotEmpty) {
-          final files = await _crypto.decryptFiles(
-            cursor.collectionID,
-            page.items,
-          );
-          await _isar.writeTxn(() async {
-            final live = files.where((f) => !f.isDeleted).toList();
-            final dead =
-                files.where((f) => f.isDeleted).map((f) => f.id).toList();
-            await _isar.enteFiles.putAll(live);
-            if (dead.isNotEmpty) await _isar.enteFiles.deleteAll(dead);
-          });
-          inserted += files.where((f) => !f.isDeleted).length;
-          cursor.sinceTime = files
-              .map((f) => f.updationTime)
-              .fold<int>(cursor.sinceTime, (a, b) => b > a ? b : a);
-        }
-        if (!page.hasMore) cursor.done = true;
-      }
-    }
-    return SyncProgress(insertedFiles: inserted, hasMore: _hasPendingWork());
-  }
-
-  _FilesCursor? _nextPendingCursor() {
-    for (var i = 0; i < _cursors.length; i++) {
-      final idx = (_cursorIndex + i) % _cursors.length;
-      if (!_cursors[idx].done) {
-        _cursorIndex = idx;
-        return _cursors[idx];
+  _FilesCursor? _pending(List<_FilesCursor> cursors) {
+    if (cursors.isEmpty) return null;
+    for (var i = 0; i < cursors.length; i++) {
+      final cursor = cursors[(_round + i) % cursors.length];
+      if (!cursor.done) {
+        _round = (_round + i + 1) % cursors.length;
+        return cursor;
       }
     }
     return null;
   }
 
-  bool _hasPendingWork() => _cursors.any((c) => !c.done);
+  Future<SyncProgress> _syncPage(_FilesCursor cursor) async {
+    final page = await _api.collectionDiff(
+      collectionID: cursor.collectionID,
+      sinceTime: cursor.sinceTime,
+    );
+    var inserted = 0;
+    var deleted = 0;
+    if (page.items.isNotEmpty) {
+      final files = await _crypto.decryptFiles(cursor.collectionID, page.items);
+      final next = files.fold<int>(
+        cursor.sinceTime,
+        (time, f) => f.updationTime > time ? f.updationTime : time,
+      );
+      if (page.hasMore && next <= cursor.sinceTime) {
+        throw StateError('File diff cursor did not advance');
+      }
+      await _isar.writeTxn(() async {
+        // Diff deletion is scoped to this album. Preserve the global file and
+        // a usable wrapped key while any other verified album link survives.
+        final previous = await _isar.enteFiles.getAll(
+          files.map((f) => f.id).toList(),
+        );
+        final byId = {for (final f in previous.whereType<EnteFile>()) f.id: f};
+        final updates = <EnteFile>[];
+        final removals = <int>[];
+        for (final file in files) {
+          final old = byId[file.id];
+          final keys = (old?.collectionKeys ?? <FileCollectionKey>[])
+              .where((k) => k.collectionID != cursor.collectionID)
+              .toList();
+          if (file.isDeleted) {
+            if (old == null) continue;
+            // A legacy row has no verified links yet. Keep it offline until
+            // every album has been replayed; final reconciliation removes it
+            // if no active album has confirmed it.
+            if (old.collectionKeys.isEmpty) continue;
+            old.collectionKeys = keys;
+            if (keys.isEmpty) {
+              removals.add(old.id);
+              byId.remove(old.id);
+            } else {
+              _selectKey(old);
+              updates.add(old);
+              byId[old.id] = old;
+            }
+          } else {
+            file.collectionKeys = [
+              ...keys,
+              FileCollectionKey()
+                ..collectionID = cursor.collectionID
+                ..encryptedKey = file.encryptedKey
+                ..keyDecryptionNonce = file.keyDecryptionNonce,
+            ];
+            updates.add(file);
+            byId[file.id] = file;
+          }
+        }
+        await _isar.enteFiles.putAll(updates);
+        deleted = await _isar.enteFiles.deleteAll(removals);
+        inserted = updates.length;
+      });
+      // A crash between the transaction and this write safely replays a page.
+      if (cursor.persist) {
+        await _preferences.setInt(_cursorKey(cursor.collectionID), next);
+      }
+      cursor.sinceTime = next;
+    } else if (page.hasMore) {
+      throw StateError('Empty file diff cannot have a following page');
+    }
+    cursor.done = !page.hasMore;
+    deleted += await _finishBackfill();
+    return SyncProgress(
+      insertedFiles: inserted,
+      deletedFiles: deleted,
+      hasMore: _cursors.any((c) => !c.done) || _recent.any((c) => !c.done),
+    );
+  }
 
-  Future<int> _maxUpdationTime() async {
-    final t = await _isar.enteCollections
-        .where()
-        .sortByUpdationTimeDesc()
-        .updationTimeProperty()
-        .findFirst();
-    return t ?? 0;
+  /// All key fields must describe the same surviving album.
+  void _selectKey(EnteFile file) {
+    final key = file.collectionKeys.firstWhere(
+      (k) => k.collectionID == file.collectionID,
+      orElse: () => file.collectionKeys.first,
+    );
+    file.collectionID = key.collectionID;
+    file.encryptedKey = key.encryptedKey;
+    file.keyDecryptionNonce = key.keyDecryptionNonce;
+  }
+
+  Future<void> _retainLinkedFile(EnteFile file) async {
+    if (file.collectionKeys.isEmpty) {
+      await _isar.enteFiles.delete(file.id);
+    } else {
+      _selectKey(file);
+      await _isar.enteFiles.put(file);
+    }
+  }
+
+  Future<int> _finishBackfill() async {
+    if (_reconciled || _cursors.any((c) => !c.done)) return 0;
+    // v3 cursors deliberately replay the archive once after the schema upgrade.
+    // No verified links means a legacy row is no longer in any active album.
+    final legacy = await _isar.enteFiles
+        .filter()
+        .collectionKeysLengthEqualTo(0)
+        .idProperty()
+        .findAll();
+    final deleted = await _isar.writeTxn(
+      () => _isar.enteFiles.deleteAll(legacy),
+    );
+    _reconciled = true;
+    return deleted;
+  }
+
+  Future<SyncProgress> syncRecentFiles({int maxPages = 3}) async {
+    var inserted = 0;
+    var deleted = 0;
+    for (var i = 0; i < maxPages; i++) {
+      final cursor = _pending(_recent);
+      if (cursor == null) break;
+      final progress = await _syncPage(cursor);
+      inserted += progress.insertedFiles;
+      deleted += progress.deletedFiles;
+    }
+    return SyncProgress(
+      insertedFiles: inserted,
+      deletedFiles: deleted,
+      hasMore: _recent.any((c) => !c.done) || _cursors.any((c) => !c.done),
+    );
+  }
+
+  Future<int> syncPersons() async {
+    final Map<String, dynamic> key;
+    try {
+      key = await _api.entityKey('cgroup');
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 404) return 0;
+      rethrow;
+    }
+    await _crypto.loadEntityKey(key);
+    var since =
+        await _isar.persons
+            .where()
+            .sortByUpdationTimeDesc()
+            .updationTimeProperty()
+            .findFirst() ??
+        0;
+    var total = 0;
+    while (true) {
+      final raw = await _api.entityDiff(type: 'cgroup', sinceTime: since);
+      if (raw.isEmpty) return total;
+      final persons = await _crypto.decryptPersons(raw);
+      await _isar.writeTxn(() async {
+        // Upsert by the unique remote identity, retaining local ids.
+        await _isar.persons.putAllByRemoteID(
+          persons.where((p) => !p.isDeleted).toList(),
+        );
+        await _isar.persons.deleteAllByRemoteID(
+          persons.where((p) => p.isDeleted).map((p) => p.remoteID).toList(),
+        );
+      });
+      total += persons.length;
+      final next = raw.fold<int>(since, (time, item) {
+        final updated = (item['updationTime'] as num?)?.toInt() ?? 0;
+        return updated > time ? updated : time;
+      });
+      if (raw.length < 500) return total;
+      if (next <= since) throw StateError('Person diff cursor did not advance');
+      since = next;
+    }
   }
 }

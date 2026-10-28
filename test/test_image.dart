@@ -1,0 +1,5 @@
+import 'dart:convert';
+
+final testImage = base64Decode(
+  'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGPwnZaHFTEMLQkA42hUQSHL1wwAAAAASUVORK5CYII=',
+);

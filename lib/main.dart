@@ -8,11 +8,11 @@ import 'src/ui/feed_screen.dart';
 import 'src/ui/login_screen.dart';
 
 // Ente brand colors
-const _primary = Color.fromRGBO(29, 185, 84, 1);
-const _primaryDark = Color.fromRGBO(0, 179, 60, 1);
-const _bg = Color.fromRGBO(22, 22, 22, 1);
-const _bgElevated = Color.fromRGBO(27, 27, 27, 1);
-const _bgElevated2 = Color.fromRGBO(37, 37, 37, 1);
+const _primary = Color(0xFFA5D9BC);
+const _primaryDark = Color(0xFF75B891);
+const _bg = Color(0xFF101713);
+const _bgElevated = Color(0xFF19231D);
+const _bgElevated2 = Color(0xFF243129);
 const _textBase = Color.fromRGBO(255, 255, 255, 1);
 const _textMuted = Color.fromRGBO(255, 255, 255, 0.6);
 const _strokeFaint = Color.fromRGBO(255, 255, 255, 0.12);
@@ -23,7 +23,7 @@ final enteTheme = ThemeData(
   scaffoldBackgroundColor: _bg,
   colorScheme: const ColorScheme.dark(
     primary: _primary,
-    onPrimary: Colors.white,
+    onPrimary: Color(0xFF102619),
     secondary: _primaryDark,
     surface: _bgElevated,
     onSurface: _textBase,
@@ -43,14 +43,14 @@ final enteTheme = ThemeData(
     color: _bgElevated,
     elevation: 0,
     shape: RoundedRectangleBorder(
-      borderRadius: BorderRadius.circular(12),
+      borderRadius: BorderRadius.circular(22),
       side: const BorderSide(color: _strokeFaint),
     ),
   ),
   filledButtonTheme: FilledButtonThemeData(
     style: FilledButton.styleFrom(
       backgroundColor: _primary,
-      foregroundColor: Colors.white,
+      foregroundColor: const Color(0xFF102619),
       minimumSize: const Size.fromHeight(50),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
@@ -94,11 +94,14 @@ final enteTheme = ThemeData(
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   Sodium.init();
+  PaintingBinding.instance.imageCache.maximumSizeBytes = 64 * 1024 * 1024;
   final prefs = await SharedPreferences.getInstance();
-  runApp(ProviderScope(
-    overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
-    child: const EntegramApp(),
-  ));
+  runApp(
+    ProviderScope(
+      overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
+      child: const EntegramApp(),
+    ),
+  );
 }
 
 class EntegramApp extends StatelessWidget {

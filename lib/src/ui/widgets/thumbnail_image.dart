@@ -35,6 +35,8 @@ class _ThumbnailImageState extends ConsumerState<ThumbnailImage> {
   Uint8List? _bytes;
   bool _failed = false;
   int _attempts = 0;
+  int _generation = 0;
+  bool _resolving = false;
   Timer? _retryTimer;
 
   @override
@@ -45,6 +47,7 @@ class _ThumbnailImageState extends ConsumerState<ThumbnailImage> {
 
   @override
   void dispose() {
+    _generation++;
     _retryTimer?.cancel();
     super.dispose();
   }
@@ -53,6 +56,8 @@ class _ThumbnailImageState extends ConsumerState<ThumbnailImage> {
   void didUpdateWidget(ThumbnailImage old) {
     super.didUpdateWidget(old);
     if (old.file.id != widget.file.id) {
+      _generation++;
+      _resolving = false;
       _retryTimer?.cancel();
       _attempts = 0;
       setState(() {
@@ -90,15 +95,18 @@ class _ThumbnailImageState extends ConsumerState<ThumbnailImage> {
   }
 
   Future<void> _resolve() async {
+    if (_resolving) return;
     final service = ref.read(thumbnailServiceProvider);
     if (service == null) {
-      // SyncController hasn't finished initialising yet — retry shortly.
       _scheduleRetry(const Duration(seconds: 2));
       return;
     }
+    final generation = ++_generation;
+    final file = widget.file;
+    _resolving = true;
     try {
-      final bytes = await service.get(widget.file);
-      if (!mounted) return;
+      final bytes = await service.get(file);
+      if (!mounted || generation != _generation) return;
       if (bytes != null) {
         _attempts = 0;
         setState(() {
@@ -106,15 +114,16 @@ class _ThumbnailImageState extends ConsumerState<ThumbnailImage> {
           _failed = false;
         });
       } else {
-        // thumbnailDecryptionHeader missing — retry after sync populates it.
         setState(() => _failed = true);
         _scheduleRetry(const Duration(seconds: 15));
       }
     } catch (_) {
-      if (!mounted) return;
+      if (!mounted || generation != _generation) return;
       _attempts++;
       setState(() => _failed = true);
       _scheduleRetry(_backoff());
+    } finally {
+      if (generation == _generation) _resolving = false;
     }
   }
 
@@ -129,6 +138,8 @@ class _ThumbnailImageState extends ConsumerState<ThumbnailImage> {
           gaplessPlayback: true,
           cacheWidth: widget.decodeWidth,
           filterQuality: FilterQuality.low,
+          errorBuilder: (_, _, _) =>
+              _Placeholder(failed: true, seed: widget.file.id),
         ),
       );
     }
@@ -190,8 +201,9 @@ class _Placeholder extends StatelessWidget {
                 height: 22,
                 child: CircularProgressIndicator(
                   strokeWidth: 2,
-                  valueColor:
-                      AlwaysStoppedAnimation(Color.fromRGBO(255, 255, 255, 0.45)),
+                  valueColor: AlwaysStoppedAnimation(
+                    Color.fromRGBO(255, 255, 255, 0.45),
+                  ),
                 ),
               ),
       ),

@@ -14,15 +14,17 @@ import '../../db/models/memory_cluster.dart';
 import '../../media/full_res_service.dart';
 import '../../providers.dart';
 import 'person_chips.dart';
+import 'media_image.dart';
 import 'thumbnail_image.dart';
 
-void openFullscreenViewer(
+Future<void> openFullscreenViewer(
   BuildContext context, {
   required List<EnteFile> files,
   required int initialIndex,
   required MemoryCluster memory,
 }) {
-  Navigator.of(context).push(
+  if (files.isEmpty) return Future.value();
+  return Navigator.of(context).push(
     PageRouteBuilder<void>(
       opaque: false,
       barrierColor: Colors.black,
@@ -31,7 +33,7 @@ void openFullscreenViewer(
         opacity: animation,
         child: _FullscreenViewer(
           files: files,
-          initialIndex: initialIndex,
+          initialIndex: initialIndex.clamp(0, files.length - 1),
           memory: memory,
         ),
       ),
@@ -67,7 +69,9 @@ class _FullscreenViewerState extends ConsumerState<_FullscreenViewer> {
     _index = widget.initialIndex;
     _page = PageController(initialPage: widget.initialIndex);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _prefetchAround(_index));
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _prefetchAround(_index),
+    );
   }
 
   @override
@@ -89,14 +93,34 @@ class _FullscreenViewerState extends ConsumerState<_FullscreenViewer> {
 
       if (file.fileType == 1) {
         final videoPath = await svc.getVideoPath(file);
-        if (mounted) await Share.shareXFiles([XFile(videoPath)], text: widget.memory.title);
+        if (mounted) {
+          await Share.shareXFiles([
+            XFile(videoPath),
+          ], text: widget.memory.title);
+        }
       } else {
         final bytes = await svc.getImageBytes(file);
         if (!mounted) return;
         final dir = await getTemporaryDirectory();
-        final path = '${dir.path}/entegram_share.jpg';
+        final shareDir = Directory(
+          '${dir.path}/entegram/${svc.cacheNamespace}',
+        );
+        await shareDir.create(recursive: true);
+        final rawExt = file.title?.split('.').last.toLowerCase() ?? 'jpg';
+        final ext = RegExp(r'^[a-z0-9]{1,8}$').hasMatch(rawExt)
+            ? rawExt
+            : 'jpg';
+        final path = '${shareDir.path}/share_${file.id}.$ext';
         await File(path).writeAsBytes(bytes);
         await Share.shareXFiles([XFile(path)], text: widget.memory.title);
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('This file could not be shared. Please try again.'),
+          ),
+        );
       }
     } finally {
       if (mounted) setState(() => _sharing = false);
@@ -129,7 +153,7 @@ class _FullscreenViewerState extends ConsumerState<_FullscreenViewer> {
 
     // Adjacent photos: defer by 1 s so the current download gets a head start.
     Future.delayed(const Duration(seconds: 1), () {
-      if (!mounted) return;
+      if (!mounted || index != _index) return;
       for (final i in [index + 1, index - 1]) {
         if (i < 0 || i >= widget.files.length) continue;
         final f = widget.files[i];
@@ -155,7 +179,10 @@ class _FullscreenViewerState extends ConsumerState<_FullscreenViewer> {
                 ? const NeverScrollableScrollPhysics()
                 : const PageScrollPhysics(),
             onPageChanged: (i) {
-              setState(() { _index = i; _isZoomed = false; });
+              setState(() {
+                _index = i;
+                _isZoomed = false;
+              });
               _prefetchAround(i);
             },
             itemCount: widget.files.length,
@@ -164,10 +191,12 @@ class _FullscreenViewerState extends ConsumerState<_FullscreenViewer> {
               return f.fileType == 1
                   ? _VideoViewer(
                       file: f,
+                      active: i == _index && !_sharing,
                       onTap: _toggleUI,
                       onZoomChanged: (z) => setState(() => _isZoomed = z),
                     )
                   : _ZoomableImage(
+                      active: i == _index,
                       file: f,
                       onTap: _toggleUI,
                       onZoomChanged: (z) => setState(() => _isZoomed = z),
@@ -183,7 +212,9 @@ class _FullscreenViewerState extends ConsumerState<_FullscreenViewer> {
                 children: [
                   // Top bar
                   Positioned(
-                    top: 0, left: 0, right: 0,
+                    top: 0,
+                    left: 0,
+                    right: 0,
                     child: _Scrim(
                       begin: Alignment.topCenter,
                       end: Alignment.bottomCenter,
@@ -193,7 +224,11 @@ class _FullscreenViewerState extends ConsumerState<_FullscreenViewer> {
                           child: Row(
                             children: [
                               IconButton(
-                                icon: const Icon(Icons.close, color: Colors.white, size: 26),
+                                icon: const Icon(
+                                  Icons.close,
+                                  color: Colors.white,
+                                  size: 26,
+                                ),
                                 onPressed: () => Navigator.of(context).pop(),
                               ),
                               const Spacer(),
@@ -234,7 +269,9 @@ class _FullscreenViewerState extends ConsumerState<_FullscreenViewer> {
                   ),
                   // Bottom bar
                   Positioned(
-                    bottom: 0, left: 0, right: 0,
+                    bottom: 0,
+                    left: 0,
+                    right: 0,
                     child: _Scrim(
                       begin: Alignment.bottomCenter,
                       end: Alignment.topCenter,
@@ -256,19 +293,25 @@ class _FullscreenViewerState extends ConsumerState<_FullscreenViewer> {
                               const SizedBox(height: 2),
                               Text(
                                 _fileDate(file),
-                                style: const TextStyle(color: Colors.white70, fontSize: 13),
+                                style: const TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 13,
+                                ),
                               ),
                               if (file.title != null) ...[
                                 const SizedBox(height: 2),
                                 Text(
                                   file.title!,
-                                  style: const TextStyle(color: Colors.white70, fontSize: 13),
+                                  style: const TextStyle(
+                                    color: Colors.white70,
+                                    fontSize: 13,
+                                  ),
                                 ),
                               ],
                               PersonChipsRow(
                                 fileId: file.id,
-                                overrideIds: (widget.memory.kind ==
-                                            MemoryKind.people &&
+                                overrideIds:
+                                    (widget.memory.kind == MemoryKind.people &&
                                         widget.memory.personIds.isNotEmpty)
                                     ? widget.memory.personIds.join(',')
                                     : null,
@@ -292,9 +335,11 @@ class _FullscreenViewerState extends ConsumerState<_FullscreenViewer> {
 // ── Zoomable image (InteractiveViewer; thumbnail upgrades to original in place)
 
 class _ZoomableImage extends ConsumerStatefulWidget {
+  final bool active;
   const _ZoomableImage({
     required this.file,
     required this.onTap,
+    required this.active,
     this.onZoomChanged,
   });
 
@@ -307,6 +352,12 @@ class _ZoomableImage extends ConsumerStatefulWidget {
 }
 
 class _ZoomableImageState extends ConsumerState<_ZoomableImage> {
+  @override
+  void didUpdateWidget(_ZoomableImage old) {
+    super.didUpdateWidget(old);
+    if (!old.active && widget.active) _loadImages();
+  }
+
   // PhotoView gives the reliable pinch-zoom + PageView coordination (via
   // PhotoViewGestureDetectorScope). Using `customChild` with a *fixed* child
   // size (the viewport) means the zoom scale no longer depends on the image's
@@ -349,7 +400,7 @@ class _ZoomableImageState extends ConsumerState<_ZoomableImage> {
     } catch (_) {}
 
     final svc = ref.read(fullResServiceProvider);
-    if (svc == null || !svc.canDecrypt(widget.file)) return;
+    if (!widget.active || svc == null || !svc.canDecrypt(widget.file)) return;
 
     // Show loading bar only if the image isn't already cached.
     if (mounted && !svc.hasImageCached(widget.file.id)) {
@@ -358,6 +409,10 @@ class _ZoomableImageState extends ConsumerState<_ZoomableImage> {
 
     try {
       final bytes = await svc.getImageBytes(widget.file);
+      if (!await canDisplayImage(bytes)) {
+        if (mounted) setState(() => _fullResLoading = false);
+        return;
+      }
       if (mounted) {
         setState(() {
           _fullResBytes = bytes;
@@ -367,7 +422,7 @@ class _ZoomableImageState extends ConsumerState<_ZoomableImage> {
     } on ImageDownloadCancelledException {
       // The prefetch for this file was cancelled when the user was elsewhere.
       // Now that this widget is active, retry immediately.
-      if (mounted) _loadImages();
+      if (mounted && widget.active) _loadImages();
     } catch (_) {
       if (mounted) setState(() => _fullResLoading = false);
     }
@@ -382,7 +437,10 @@ class _ZoomableImageState extends ConsumerState<_ZoomableImage> {
         alignment: Alignment.center,
         children: [
           ThumbnailImage(file: widget.file, fit: BoxFit.contain),
-          const CircularProgressIndicator(color: Colors.white54, strokeWidth: 2),
+          const CircularProgressIndicator(
+            color: Colors.white54,
+            strokeWidth: 2,
+          ),
         ],
       );
     }
@@ -415,7 +473,9 @@ class _ZoomableImageState extends ConsumerState<_ZoomableImage> {
         ),
         if (_fullResLoading)
           const Positioned(
-            bottom: 0, left: 0, right: 0,
+            bottom: 0,
+            left: 0,
+            right: 0,
             child: LinearProgressIndicator(
               value: null,
               backgroundColor: Colors.transparent,
@@ -431,7 +491,13 @@ class _ZoomableImageState extends ConsumerState<_ZoomableImage> {
 // ── Video viewer ──────────────────────────────────────────────────────────────
 
 class _VideoViewer extends ConsumerStatefulWidget {
-  const _VideoViewer({required this.file, required this.onTap, this.onZoomChanged});
+  final bool active;
+  const _VideoViewer({
+    required this.file,
+    required this.onTap,
+    required this.active,
+    this.onZoomChanged,
+  });
 
   final EnteFile file;
   final VoidCallback onTap;
@@ -441,7 +507,34 @@ class _VideoViewer extends ConsumerStatefulWidget {
   ConsumerState<_VideoViewer> createState() => _VideoViewerState();
 }
 
-class _VideoViewerState extends ConsumerState<_VideoViewer> {
+class _VideoViewerState extends ConsumerState<_VideoViewer>
+    with WidgetsBindingObserver {
+  bool _foreground = true;
+  bool _initializing = false;
+  bool _userPaused = false;
+  void _syncPlayback() {
+    final ctrl = _controller;
+    if (ctrl == null) return;
+    if (widget.active && _foreground && !_userPaused) {
+      ctrl.play().ignore();
+    } else {
+      ctrl.pause().ignore();
+    }
+  }
+
+  @override
+  void didUpdateWidget(_VideoViewer old) {
+    super.didUpdateWidget(old);
+    if (widget.active && _controller == null) _initVideo();
+    _syncPlayback();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _foreground = state == AppLifecycleState.resumed;
+    _syncPlayback();
+  }
+
   VideoPlayerController? _controller;
   StreamSubscription<double>? _progressSub;
   double? _downloadProgress; // 0..0.99 downloading; null = done or not started
@@ -455,12 +548,14 @@ class _VideoViewerState extends ConsumerState<_VideoViewer> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _transform.addListener(_onTransform);
-    _initVideo();
+    if (widget.active) _initVideo();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _transform.removeListener(_onTransform);
     _transform.dispose();
     _progressSub?.cancel();
@@ -477,9 +572,12 @@ class _VideoViewerState extends ConsumerState<_VideoViewer> {
   }
 
   Future<void> _initVideo() async {
+    if (_initializing || !widget.active) return;
+    _initializing = true;
     final svc = ref.read(fullResServiceProvider);
     if (svc == null || !svc.canDecrypt(widget.file)) {
       if (mounted) setState(() => _error = 'No decryption key');
+      _initializing = false;
       return;
     }
 
@@ -497,23 +595,40 @@ class _VideoViewerState extends ConsumerState<_VideoViewer> {
       });
     });
 
+    VideoPlayerController? pendingController;
     try {
       final path = await svc.getVideoPath(widget.file);
       _progressSub?.cancel();
       _progressSub = null;
       if (!mounted) return;
-      setState(() { _downloadProgress = null; _decrypting = false; });
+      setState(() {
+        _downloadProgress = null;
+        _decrypting = false;
+      });
 
       final ctrl = VideoPlayerController.file(File(path));
+      pendingController = ctrl;
       await ctrl.initialize();
-      if (!mounted) { ctrl.dispose(); return; }
+      if (!mounted) {
+        ctrl.dispose();
+        return;
+      }
       setState(() => _controller = ctrl);
-      ctrl.play().ignore();
-      ctrl.setLooping(true);
+      _syncPlayback();
+      ctrl.setLooping(true).ignore();
     } catch (e) {
+      await pendingController?.dispose();
       _progressSub?.cancel();
       _progressSub = null;
-      if (mounted) setState(() { _downloadProgress = null; _decrypting = false; _error = e.toString(); });
+      if (mounted) {
+        setState(() {
+          _downloadProgress = null;
+          _decrypting = false;
+          _error = e.toString();
+        });
+      }
+    } finally {
+      _initializing = false;
     }
   }
 
@@ -542,7 +657,8 @@ class _VideoViewerState extends ConsumerState<_VideoViewer> {
             child: GestureDetector(
               onTap: widget.onTap,
               onDoubleTap: () {
-                ctrl.value.isPlaying ? ctrl.pause() : ctrl.play();
+                _userPaused = !_userPaused;
+                _syncPlayback();
                 setState(() {});
               },
               child: InteractiveViewer(
@@ -562,29 +678,37 @@ class _VideoViewerState extends ConsumerState<_VideoViewer> {
             ),
           ),
           ValueListenableBuilder(
-              valueListenable: ctrl,
-              builder: (_, VideoPlayerValue val, _) {
-                return AnimatedOpacity(
-                  opacity: val.isPlaying ? 0.0 : 1.0,
-                  duration: const Duration(milliseconds: 200),
-                  child: GestureDetector(
-                    onTap: () { ctrl.play(); setState(() {}); },
-                    child: Container(
-                      width: 64,
-                      height: 64,
-                      decoration: BoxDecoration(
-                        color: Colors.black54,
-                        shape: BoxShape.circle,
-                        border: Border.all(color: Colors.white60, width: 2),
-                      ),
-                      child: const Icon(Icons.play_arrow, color: Colors.white, size: 36),
+            valueListenable: ctrl,
+            builder: (_, VideoPlayerValue val, _) {
+              return AnimatedOpacity(
+                opacity: val.isPlaying ? 0.0 : 1.0,
+                duration: const Duration(milliseconds: 200),
+                child: GestureDetector(
+                  onTap: () {
+                    _userPaused = false;
+                    _syncPlayback();
+                    setState(() {});
+                  },
+                  child: Container(
+                    width: 64,
+                    height: 64,
+                    decoration: BoxDecoration(
+                      color: Colors.black54,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white60, width: 2),
+                    ),
+                    child: const Icon(
+                      Icons.play_arrow,
+                      color: Colors.white,
+                      size: 36,
                     ),
                   ),
-                );
-              },
-            ),
-          ],
-        );
+                ),
+              );
+            },
+          ),
+        ],
+      );
     }
 
     // Loading — thumbnail + Ente-style circular progress
@@ -611,7 +735,9 @@ class _VideoViewerState extends ConsumerState<_VideoViewer> {
                     CircularProgressIndicator(
                       value: _downloadProgress,
                       backgroundColor: Colors.white24,
-                      valueColor: const AlwaysStoppedAnimation(Color(0xFF00C853)),
+                      valueColor: const AlwaysStoppedAnimation(
+                        Color(0xFF00C853),
+                      ),
                       strokeWidth: 2.5,
                       strokeCap: StrokeCap.round,
                     ),
@@ -636,8 +762,18 @@ String _fileDate(EnteFile file) {
   if (file.creationTime <= 0) return '';
   final dt = DateTime.fromMicrosecondsSinceEpoch(file.creationTime);
   const months = [
-    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
   ];
   final day = dt.day.toString().padLeft(2, '0');
   return '$day ${months[dt.month - 1]} ${dt.year}';

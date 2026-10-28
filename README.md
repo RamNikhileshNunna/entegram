@@ -11,7 +11,7 @@ An Instagram-style **memories feed** and **stories viewer** for your [Ente Photo
 | Memories feed | Year memory | Story viewer |
 |:---:|:---:|:---:|
 | <img src="docs/screenshots/feed.jpg" width="240" alt="Instagram-style memories feed" /> | <img src="docs/screenshots/year-memory.jpg" width="240" alt="A per-year memory card" /> | <img src="docs/screenshots/story-viewer.jpg" width="240" alt="Full-screen story viewer" /> |
-| Infinite, reshuffled feed of trips, people and look-backs | Per-year and seasonal recaps work without ML | Tap-to-advance full-screen playback with per-slide progress |
+| Previous feed UI | Previous year-memory UI | Previous story UI |
 
 ---
 
@@ -19,18 +19,23 @@ An Instagram-style **memories feed** and **stories viewer** for your [Ente Photo
 
 | Feature | Detail |
 |---|---|
-| **Infinite memories feed** | A never-ending, Instagram-style feed of your memories. Kinds are interleaved and reshuffled with a fresh seed each launch, so the feed feels different every time you open it. |
-| **Stories** | Tap a bubble at the top for full-screen story playback — per-slide progress bar, tap-to-advance, video autoplay, and swipe between stories. |
-| **People memories** | "You and Alex", spotlights and "last time with…" built from **co-occurrence** of face clusters (only photos where people actually appear together), so titles match the faces on screen. Per-face name chips overlay each slide. |
-| **Trips** | GPS-clustered trips with home detection and geo-temporal grouping, titled with the date range. |
-| **On this day & flashbacks** | "On this day", "A year ago this month", and recent-window memories. |
-| **Seasons & year summaries** | Summer/winter and per-year recaps for a long-tail of memories even on accounts without ML. |
-| **Works without ML** | People memories need ML enabled on your Ente account, but everything else (trips, on-this-day, seasons, years, recents) works on **ML-disabled** accounts too. |
-| **Zoomable viewer** | Pinch-to-zoom in the full-screen viewer. Slides open instantly from the cached thumbnail and **seamlessly swap to full resolution at the same zoom position** — no flash, no reset. |
-| **Self-hosted friendly** | Thumbnails/originals are fetched from Ente's CDN workers on production, and **directly from your server** on self-hosted instances — no CDN dependency. |
-| **End-to-end encryption** | SRP login + Argon2id key derivation; file keys and ML data decrypted in an on-device crypto isolate using [Ente's flutter_sodium fork](https://github.com/ente-io/flutter_sodium). |
-| **2FA** | TOTP two-factor authentication is supported at sign-in. |
-| **Share & sign out** | Share any photo via the system share sheet. One-tap sign out wipes the local Isar DB so no decrypted data lingers. |
+| **Curated memories feed** | A finite, varied selection with stable positions during sync, category filters, retryable pagination and phone/tablet layouts. |
+| **Daily memories** | Exact-date anniversaries across your full archive, calendar month flashbacks and recent highlights. |
+| **People** | Named-person highlights and co-occurrence-only pairs. Hidden people are excluded; the app does not guess who is “you.” |
+| **Trips** | Away events with home confidence, return-home boundaries and bounded time windows. |
+| **Year & seasonal highlights** | Samples spread across dates, hemisphere-aware seasons, and neutral quarters when GPS is unavailable. |
+| **Stories** | Stable photo cards, per-account seen state, hold/manual/background pause, guarded async navigation and video-player-driven progress. |
+| **Photo quality & variety** | Content-hash deduplication, screenshot filename filtering, distinct covers, bounded photo reuse and limited nearby prefetching. No external ML service is used. |
+| **Zoomable originals** | Cached thumbnails upgrade to supported original formats; videos play only on the visible gallery page. |
+| **Self-hosted friendly** | Media uses Ente’s production CDN workers or your configured server. |
+| **End-to-end encryption** | Existing SRP login, Argon2id derivation and on-device libsodium decryption remain in place. |
+| **2FA** | Authenticator-app TOTP support at sign-in. |
+| **Sign out** | Removes synced database content, per-account media caches, story state and sync cursors. |
+
+The curation and playback rewrite follows the daily-memory and highlight
+patterns of Immich and Google Photos using the metadata available locally.
+See [memory architecture, source review and tradeoffs](docs/MEMORIES.md) for
+precise algorithms and validation limits.
 
 ---
 
@@ -38,7 +43,7 @@ An Instagram-style **memories feed** and **stories viewer** for your [Ente Photo
 
 ### Prerequisites
 
-- [Flutter SDK](https://docs.flutter.dev/get-started/install) **≥ 3.12**
+- [Flutter SDK](https://docs.flutter.dev/get-started/install) **3.44.1** (Dart **3.12.1**), matching CI
 - An [Ente Photos](https://ente.io) account (free tier works), or a self-hosted [Ente server](https://github.com/ente-io/ente)
 - Android (tested) or iOS — other platforms may build but aren't actively supported
 
@@ -77,38 +82,38 @@ lib/src/
 ├── crypto/        libsodium wrapper + on-device crypto isolate
 ├── db/            Isar models — EnteFile, EnteCollection, Person, MemoryCluster
 ├── media/         ThumbnailService, FullResService (concurrency + retry + circuit breaker)
-├── memories/      MemoryMapper — builds MemoryCluster rows from synced files & ML data
+├── memories/      MemoryEngine + MemoryMapper — local curation and stable persistence
 ├── network/       EnteApi (Dio REST client; CDN-worker vs. direct fetch)
 ├── sync/          SyncController, per-collection sinceTime cursors, ML data fetch
 └── ui/
-    ├── feed_screen.dart       Infinite feed with pool/display recycling + shuffle
+    ├── feed_screen.dart       Finite filtered feed with responsive lazy rows
     ├── login_screen.dart
     └── widgets/
-        ├── stories_bar.dart      Horizontal story bubbles
+        ├── stories_bar.dart      Rectangular daily memory cards
         ├── story_viewer.dart     Full-screen story player
-        ├── memory_card.dart      Feed card (green page dots, overlay chips)
+        ├── memory_card.dart      Responsive memory card with a curated photo grid
         ├── fullscreen_viewer.dart Zoomable viewer with seamless thumb→original swap
         ├── person_chips.dart     Per-face name chips
         └── thumbnail_image.dart
 ```
 
-State is managed with **Riverpod 3.x**. The DB layer is **Isar Community** — providers stream live from the DB, so the feed updates automatically as sync pages and memories arrive.
+State is managed with **Riverpod 3.x** and persisted in **Isar Community**. Memory curation runs in a worker isolate, stable identities survive rebuilds, and reactive file streams update visible cards as sync progresses.
 
 ---
 
 ## How it works
 
-1. **Sync.** On launch, Entegram fetches your collections, then pages through each owned collection's diff (advancing a per-collection `sinceTime` cursor), then persons and ML data. Background sync continues paging after the first screen is interactive so startup stays snappy.
-2. **Decrypt locally.** File keys, thumbnails, originals and ML embeddings are decrypted in an on-device crypto isolate. Nothing is sent anywhere except the authenticated requests to your own Ente server.
-3. **Build memories.** `MemoryMapper` turns synced files + face/CLIP ML data into `MemoryCluster` rows — people co-occurrence, spotlights, last-time, trips, on-this-day, flashbacks, seasons, year summaries and recents.
-4. **Feed.** The feed interleaves memory kinds and reshuffles them with a per-launch seed, recycling display items as new memories stream in so it scrolls forever.
+1. **Sync.** Recent-priority requests show useful photos quickly. Separate, persistent backfill cursors continue through the archive without skipping older files on restart.
+2. **Decrypt locally.** The existing crypto isolate decrypts metadata and media with your account’s keys.
+3. **Curate.** A worker groups exact anniversaries, people, trips, seasons, years and recent dates, then balances highlights and removes repetitive selections.
+4. **Browse.** A responsive, unique feed and stable story rail show cached thumbnails; originals load on demand. Story playback respects loading, holds, zoom, lifecycle and explicit pause.
 
 ---
 
 ## Privacy & security
 
 - **Read-only.** Entegram only reads from your library; it never modifies or deletes your photos.
-- **Local decryption.** All crypto happens on-device in an isolate; keys never leave it.
+- **Local decryption.** Crypto runs on-device in worker isolates. Session keys currently use SharedPreferences; see the [storage limitations](docs/MEMORIES.md#playback-and-responsiveness).
 - **No password storage.** Your password is used once to derive the master key, then discarded.
 - **Same API as the official app.** No extra scopes, no third-party servers. Sign out wipes the local DB.
 

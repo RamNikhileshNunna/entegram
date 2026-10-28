@@ -22,72 +22,79 @@ const EnteFileSchema = CollectionSchema(
       name: r'collectionID',
       type: IsarType.long,
     ),
-    r'creationTime': PropertySchema(
+    r'collectionKeys': PropertySchema(
       id: 1,
+      name: r'collectionKeys',
+      type: IsarType.objectList,
+
+      target: r'FileCollectionKey',
+    ),
+    r'creationTime': PropertySchema(
+      id: 2,
       name: r'creationTime',
       type: IsarType.long,
     ),
     r'encryptedKey': PropertySchema(
-      id: 2,
+      id: 3,
       name: r'encryptedKey',
       type: IsarType.string,
     ),
     r'faceClusterIds': PropertySchema(
-      id: 3,
+      id: 4,
       name: r'faceClusterIds',
       type: IsarType.stringList,
     ),
     r'fileDecryptionHeader': PropertySchema(
-      id: 4,
+      id: 5,
       name: r'fileDecryptionHeader',
       type: IsarType.string,
     ),
-    r'fileType': PropertySchema(id: 5, name: r'fileType', type: IsarType.long),
-    r'hash': PropertySchema(id: 6, name: r'hash', type: IsarType.string),
-    r'height': PropertySchema(id: 7, name: r'height', type: IsarType.long),
+    r'fileType': PropertySchema(id: 6, name: r'fileType', type: IsarType.long),
+    r'hash': PropertySchema(id: 7, name: r'hash', type: IsarType.string),
+    r'height': PropertySchema(id: 8, name: r'height', type: IsarType.long),
     r'isDeleted': PropertySchema(
-      id: 8,
+      id: 9,
       name: r'isDeleted',
       type: IsarType.bool,
     ),
     r'keyDecryptionNonce': PropertySchema(
-      id: 9,
+      id: 10,
       name: r'keyDecryptionNonce',
       type: IsarType.string,
     ),
     r'latitude': PropertySchema(
-      id: 10,
+      id: 11,
       name: r'latitude',
       type: IsarType.double,
     ),
     r'longitude': PropertySchema(
-      id: 11,
+      id: 12,
       name: r'longitude',
       type: IsarType.double,
     ),
     r'modificationTime': PropertySchema(
-      id: 12,
+      id: 13,
       name: r'modificationTime',
       type: IsarType.long,
     ),
-    r'ownerID': PropertySchema(id: 13, name: r'ownerID', type: IsarType.long),
+    r'ownerID': PropertySchema(id: 14, name: r'ownerID', type: IsarType.long),
     r'personIds': PropertySchema(
-      id: 14,
+      id: 15,
       name: r'personIds',
       type: IsarType.stringList,
     ),
     r'thumbnailDecryptionHeader': PropertySchema(
-      id: 15,
+      id: 16,
       name: r'thumbnailDecryptionHeader',
       type: IsarType.string,
     ),
-    r'title': PropertySchema(id: 16, name: r'title', type: IsarType.string),
+    r'title': PropertySchema(id: 17, name: r'title', type: IsarType.string),
     r'updationTime': PropertySchema(
-      id: 17,
+      id: 18,
       name: r'updationTime',
       type: IsarType.long,
     ),
-    r'width': PropertySchema(id: 18, name: r'width', type: IsarType.long),
+    r'width': PropertySchema(id: 19, name: r'width', type: IsarType.long),
   },
 
   estimateSize: _enteFileEstimateSize,
@@ -124,7 +131,7 @@ const EnteFileSchema = CollectionSchema(
     ),
   },
   links: {},
-  embeddedSchemas: {},
+  embeddedSchemas: {r'FileCollectionKey': FileCollectionKeySchema},
 
   getId: _enteFileGetId,
   getLinks: _enteFileGetLinks,
@@ -138,6 +145,18 @@ int _enteFileEstimateSize(
   Map<Type, List<int>> allOffsets,
 ) {
   var bytesCount = offsets.last;
+  bytesCount += 3 + object.collectionKeys.length * 3;
+  {
+    final offsets = allOffsets[FileCollectionKey]!;
+    for (var i = 0; i < object.collectionKeys.length; i++) {
+      final value = object.collectionKeys[i];
+      bytesCount += FileCollectionKeySchema.estimateSize(
+        value,
+        offsets,
+        allOffsets,
+      );
+    }
+  }
   {
     final value = object.encryptedKey;
     if (value != null) {
@@ -198,24 +217,30 @@ void _enteFileSerialize(
   Map<Type, List<int>> allOffsets,
 ) {
   writer.writeLong(offsets[0], object.collectionID);
-  writer.writeLong(offsets[1], object.creationTime);
-  writer.writeString(offsets[2], object.encryptedKey);
-  writer.writeStringList(offsets[3], object.faceClusterIds);
-  writer.writeString(offsets[4], object.fileDecryptionHeader);
-  writer.writeLong(offsets[5], object.fileType);
-  writer.writeString(offsets[6], object.hash);
-  writer.writeLong(offsets[7], object.height);
-  writer.writeBool(offsets[8], object.isDeleted);
-  writer.writeString(offsets[9], object.keyDecryptionNonce);
-  writer.writeDouble(offsets[10], object.latitude);
-  writer.writeDouble(offsets[11], object.longitude);
-  writer.writeLong(offsets[12], object.modificationTime);
-  writer.writeLong(offsets[13], object.ownerID);
-  writer.writeStringList(offsets[14], object.personIds);
-  writer.writeString(offsets[15], object.thumbnailDecryptionHeader);
-  writer.writeString(offsets[16], object.title);
-  writer.writeLong(offsets[17], object.updationTime);
-  writer.writeLong(offsets[18], object.width);
+  writer.writeObjectList<FileCollectionKey>(
+    offsets[1],
+    allOffsets,
+    FileCollectionKeySchema.serialize,
+    object.collectionKeys,
+  );
+  writer.writeLong(offsets[2], object.creationTime);
+  writer.writeString(offsets[3], object.encryptedKey);
+  writer.writeStringList(offsets[4], object.faceClusterIds);
+  writer.writeString(offsets[5], object.fileDecryptionHeader);
+  writer.writeLong(offsets[6], object.fileType);
+  writer.writeString(offsets[7], object.hash);
+  writer.writeLong(offsets[8], object.height);
+  writer.writeBool(offsets[9], object.isDeleted);
+  writer.writeString(offsets[10], object.keyDecryptionNonce);
+  writer.writeDouble(offsets[11], object.latitude);
+  writer.writeDouble(offsets[12], object.longitude);
+  writer.writeLong(offsets[13], object.modificationTime);
+  writer.writeLong(offsets[14], object.ownerID);
+  writer.writeStringList(offsets[15], object.personIds);
+  writer.writeString(offsets[16], object.thumbnailDecryptionHeader);
+  writer.writeString(offsets[17], object.title);
+  writer.writeLong(offsets[18], object.updationTime);
+  writer.writeLong(offsets[19], object.width);
 }
 
 EnteFile _enteFileDeserialize(
@@ -226,25 +251,33 @@ EnteFile _enteFileDeserialize(
 ) {
   final object = EnteFile();
   object.collectionID = reader.readLong(offsets[0]);
-  object.creationTime = reader.readLong(offsets[1]);
-  object.encryptedKey = reader.readStringOrNull(offsets[2]);
-  object.faceClusterIds = reader.readStringList(offsets[3]) ?? [];
-  object.fileDecryptionHeader = reader.readStringOrNull(offsets[4]);
-  object.fileType = reader.readLong(offsets[5]);
-  object.hash = reader.readStringOrNull(offsets[6]);
-  object.height = reader.readLongOrNull(offsets[7]);
+  object.collectionKeys =
+      reader.readObjectList<FileCollectionKey>(
+        offsets[1],
+        FileCollectionKeySchema.deserialize,
+        allOffsets,
+        FileCollectionKey(),
+      ) ??
+      [];
+  object.creationTime = reader.readLong(offsets[2]);
+  object.encryptedKey = reader.readStringOrNull(offsets[3]);
+  object.faceClusterIds = reader.readStringList(offsets[4]) ?? [];
+  object.fileDecryptionHeader = reader.readStringOrNull(offsets[5]);
+  object.fileType = reader.readLong(offsets[6]);
+  object.hash = reader.readStringOrNull(offsets[7]);
+  object.height = reader.readLongOrNull(offsets[8]);
   object.id = id;
-  object.isDeleted = reader.readBool(offsets[8]);
-  object.keyDecryptionNonce = reader.readStringOrNull(offsets[9]);
-  object.latitude = reader.readDoubleOrNull(offsets[10]);
-  object.longitude = reader.readDoubleOrNull(offsets[11]);
-  object.modificationTime = reader.readLong(offsets[12]);
-  object.ownerID = reader.readLong(offsets[13]);
-  object.personIds = reader.readStringList(offsets[14]) ?? [];
-  object.thumbnailDecryptionHeader = reader.readStringOrNull(offsets[15]);
-  object.title = reader.readStringOrNull(offsets[16]);
-  object.updationTime = reader.readLong(offsets[17]);
-  object.width = reader.readLongOrNull(offsets[18]);
+  object.isDeleted = reader.readBool(offsets[9]);
+  object.keyDecryptionNonce = reader.readStringOrNull(offsets[10]);
+  object.latitude = reader.readDoubleOrNull(offsets[11]);
+  object.longitude = reader.readDoubleOrNull(offsets[12]);
+  object.modificationTime = reader.readLong(offsets[13]);
+  object.ownerID = reader.readLong(offsets[14]);
+  object.personIds = reader.readStringList(offsets[15]) ?? [];
+  object.thumbnailDecryptionHeader = reader.readStringOrNull(offsets[16]);
+  object.title = reader.readStringOrNull(offsets[17]);
+  object.updationTime = reader.readLong(offsets[18]);
+  object.width = reader.readLongOrNull(offsets[19]);
   return object;
 }
 
@@ -258,40 +291,49 @@ P _enteFileDeserializeProp<P>(
     case 0:
       return (reader.readLong(offset)) as P;
     case 1:
-      return (reader.readLong(offset)) as P;
+      return (reader.readObjectList<FileCollectionKey>(
+                offset,
+                FileCollectionKeySchema.deserialize,
+                allOffsets,
+                FileCollectionKey(),
+              ) ??
+              [])
+          as P;
     case 2:
-      return (reader.readStringOrNull(offset)) as P;
-    case 3:
-      return (reader.readStringList(offset) ?? []) as P;
-    case 4:
-      return (reader.readStringOrNull(offset)) as P;
-    case 5:
       return (reader.readLong(offset)) as P;
+    case 3:
+      return (reader.readStringOrNull(offset)) as P;
+    case 4:
+      return (reader.readStringList(offset) ?? []) as P;
+    case 5:
+      return (reader.readStringOrNull(offset)) as P;
     case 6:
-      return (reader.readStringOrNull(offset)) as P;
+      return (reader.readLong(offset)) as P;
     case 7:
-      return (reader.readLongOrNull(offset)) as P;
-    case 8:
-      return (reader.readBool(offset)) as P;
-    case 9:
       return (reader.readStringOrNull(offset)) as P;
+    case 8:
+      return (reader.readLongOrNull(offset)) as P;
+    case 9:
+      return (reader.readBool(offset)) as P;
     case 10:
-      return (reader.readDoubleOrNull(offset)) as P;
+      return (reader.readStringOrNull(offset)) as P;
     case 11:
       return (reader.readDoubleOrNull(offset)) as P;
     case 12:
-      return (reader.readLong(offset)) as P;
+      return (reader.readDoubleOrNull(offset)) as P;
     case 13:
       return (reader.readLong(offset)) as P;
     case 14:
-      return (reader.readStringList(offset) ?? []) as P;
+      return (reader.readLong(offset)) as P;
     case 15:
-      return (reader.readStringOrNull(offset)) as P;
+      return (reader.readStringList(offset) ?? []) as P;
     case 16:
       return (reader.readStringOrNull(offset)) as P;
     case 17:
-      return (reader.readLong(offset)) as P;
+      return (reader.readStringOrNull(offset)) as P;
     case 18:
+      return (reader.readLong(offset)) as P;
+    case 19:
       return (reader.readLongOrNull(offset)) as P;
     default:
       throw IsarError('Unknown property with id $propertyId');
@@ -675,6 +717,59 @@ extension EnteFileQueryFilter
           upper: upper,
           includeUpper: includeUpper,
         ),
+      );
+    });
+  }
+
+  QueryBuilder<EnteFile, EnteFile, QAfterFilterCondition>
+  collectionKeysLengthEqualTo(int length) {
+    return QueryBuilder.apply(this, (query) {
+      return query.listLength(r'collectionKeys', length, true, length, true);
+    });
+  }
+
+  QueryBuilder<EnteFile, EnteFile, QAfterFilterCondition>
+  collectionKeysIsEmpty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.listLength(r'collectionKeys', 0, true, 0, true);
+    });
+  }
+
+  QueryBuilder<EnteFile, EnteFile, QAfterFilterCondition>
+  collectionKeysIsNotEmpty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.listLength(r'collectionKeys', 0, false, 999999, true);
+    });
+  }
+
+  QueryBuilder<EnteFile, EnteFile, QAfterFilterCondition>
+  collectionKeysLengthLessThan(int length, {bool include = false}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.listLength(r'collectionKeys', 0, true, length, include);
+    });
+  }
+
+  QueryBuilder<EnteFile, EnteFile, QAfterFilterCondition>
+  collectionKeysLengthGreaterThan(int length, {bool include = false}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.listLength(r'collectionKeys', length, include, 999999, true);
+    });
+  }
+
+  QueryBuilder<EnteFile, EnteFile, QAfterFilterCondition>
+  collectionKeysLengthBetween(
+    int lower,
+    int upper, {
+    bool includeLower = true,
+    bool includeUpper = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.listLength(
+        r'collectionKeys',
+        lower,
+        includeLower,
+        upper,
+        includeUpper,
       );
     });
   }
@@ -2732,7 +2827,15 @@ extension EnteFileQueryFilter
 }
 
 extension EnteFileQueryObject
-    on QueryBuilder<EnteFile, EnteFile, QFilterCondition> {}
+    on QueryBuilder<EnteFile, EnteFile, QFilterCondition> {
+  QueryBuilder<EnteFile, EnteFile, QAfterFilterCondition> collectionKeysElement(
+    FilterQuery<FileCollectionKey> q,
+  ) {
+    return QueryBuilder.apply(this, (query) {
+      return query.object(q, r'collectionKeys');
+    });
+  }
+}
 
 extension EnteFileQueryLinks
     on QueryBuilder<EnteFile, EnteFile, QFilterCondition> {}
@@ -3321,6 +3424,13 @@ extension EnteFileQueryProperty
     });
   }
 
+  QueryBuilder<EnteFile, List<FileCollectionKey>, QQueryOperations>
+  collectionKeysProperty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addPropertyName(r'collectionKeys');
+    });
+  }
+
   QueryBuilder<EnteFile, int, QQueryOperations> creationTimeProperty() {
     return QueryBuilder.apply(this, (query) {
       return query.addPropertyName(r'creationTime');
@@ -3433,3 +3543,479 @@ extension EnteFileQueryProperty
     });
   }
 }
+
+// **************************************************************************
+// IsarEmbeddedGenerator
+// **************************************************************************
+
+// coverage:ignore-file
+// ignore_for_file: duplicate_ignore, non_constant_identifier_names, constant_identifier_names, invalid_use_of_protected_member, unnecessary_cast, prefer_const_constructors, lines_longer_than_80_chars, require_trailing_commas, inference_failure_on_function_invocation, unnecessary_parenthesis, unnecessary_raw_strings, unnecessary_null_checks, join_return_with_assignment, prefer_final_locals, avoid_js_rounded_ints, avoid_positional_boolean_parameters, always_specify_types
+
+const FileCollectionKeySchema = Schema(
+  name: r'FileCollectionKey',
+  id: 952642583636294932,
+  properties: {
+    r'collectionID': PropertySchema(
+      id: 0,
+      name: r'collectionID',
+      type: IsarType.long,
+    ),
+    r'encryptedKey': PropertySchema(
+      id: 1,
+      name: r'encryptedKey',
+      type: IsarType.string,
+    ),
+    r'keyDecryptionNonce': PropertySchema(
+      id: 2,
+      name: r'keyDecryptionNonce',
+      type: IsarType.string,
+    ),
+  },
+
+  estimateSize: _fileCollectionKeyEstimateSize,
+  serialize: _fileCollectionKeySerialize,
+  deserialize: _fileCollectionKeyDeserialize,
+  deserializeProp: _fileCollectionKeyDeserializeProp,
+);
+
+int _fileCollectionKeyEstimateSize(
+  FileCollectionKey object,
+  List<int> offsets,
+  Map<Type, List<int>> allOffsets,
+) {
+  var bytesCount = offsets.last;
+  {
+    final value = object.encryptedKey;
+    if (value != null) {
+      bytesCount += 3 + value.length * 3;
+    }
+  }
+  {
+    final value = object.keyDecryptionNonce;
+    if (value != null) {
+      bytesCount += 3 + value.length * 3;
+    }
+  }
+  return bytesCount;
+}
+
+void _fileCollectionKeySerialize(
+  FileCollectionKey object,
+  IsarWriter writer,
+  List<int> offsets,
+  Map<Type, List<int>> allOffsets,
+) {
+  writer.writeLong(offsets[0], object.collectionID);
+  writer.writeString(offsets[1], object.encryptedKey);
+  writer.writeString(offsets[2], object.keyDecryptionNonce);
+}
+
+FileCollectionKey _fileCollectionKeyDeserialize(
+  Id id,
+  IsarReader reader,
+  List<int> offsets,
+  Map<Type, List<int>> allOffsets,
+) {
+  final object = FileCollectionKey();
+  object.collectionID = reader.readLong(offsets[0]);
+  object.encryptedKey = reader.readStringOrNull(offsets[1]);
+  object.keyDecryptionNonce = reader.readStringOrNull(offsets[2]);
+  return object;
+}
+
+P _fileCollectionKeyDeserializeProp<P>(
+  IsarReader reader,
+  int propertyId,
+  int offset,
+  Map<Type, List<int>> allOffsets,
+) {
+  switch (propertyId) {
+    case 0:
+      return (reader.readLong(offset)) as P;
+    case 1:
+      return (reader.readStringOrNull(offset)) as P;
+    case 2:
+      return (reader.readStringOrNull(offset)) as P;
+    default:
+      throw IsarError('Unknown property with id $propertyId');
+  }
+}
+
+extension FileCollectionKeyQueryFilter
+    on QueryBuilder<FileCollectionKey, FileCollectionKey, QFilterCondition> {
+  QueryBuilder<FileCollectionKey, FileCollectionKey, QAfterFilterCondition>
+  collectionIDEqualTo(int value) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.equalTo(property: r'collectionID', value: value),
+      );
+    });
+  }
+
+  QueryBuilder<FileCollectionKey, FileCollectionKey, QAfterFilterCondition>
+  collectionIDGreaterThan(int value, {bool include = false}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.greaterThan(
+          include: include,
+          property: r'collectionID',
+          value: value,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<FileCollectionKey, FileCollectionKey, QAfterFilterCondition>
+  collectionIDLessThan(int value, {bool include = false}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.lessThan(
+          include: include,
+          property: r'collectionID',
+          value: value,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<FileCollectionKey, FileCollectionKey, QAfterFilterCondition>
+  collectionIDBetween(
+    int lower,
+    int upper, {
+    bool includeLower = true,
+    bool includeUpper = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.between(
+          property: r'collectionID',
+          lower: lower,
+          includeLower: includeLower,
+          upper: upper,
+          includeUpper: includeUpper,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<FileCollectionKey, FileCollectionKey, QAfterFilterCondition>
+  encryptedKeyIsNull() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        const FilterCondition.isNull(property: r'encryptedKey'),
+      );
+    });
+  }
+
+  QueryBuilder<FileCollectionKey, FileCollectionKey, QAfterFilterCondition>
+  encryptedKeyIsNotNull() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        const FilterCondition.isNotNull(property: r'encryptedKey'),
+      );
+    });
+  }
+
+  QueryBuilder<FileCollectionKey, FileCollectionKey, QAfterFilterCondition>
+  encryptedKeyEqualTo(String? value, {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.equalTo(
+          property: r'encryptedKey',
+          value: value,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<FileCollectionKey, FileCollectionKey, QAfterFilterCondition>
+  encryptedKeyGreaterThan(
+    String? value, {
+    bool include = false,
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.greaterThan(
+          include: include,
+          property: r'encryptedKey',
+          value: value,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<FileCollectionKey, FileCollectionKey, QAfterFilterCondition>
+  encryptedKeyLessThan(
+    String? value, {
+    bool include = false,
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.lessThan(
+          include: include,
+          property: r'encryptedKey',
+          value: value,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<FileCollectionKey, FileCollectionKey, QAfterFilterCondition>
+  encryptedKeyBetween(
+    String? lower,
+    String? upper, {
+    bool includeLower = true,
+    bool includeUpper = true,
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.between(
+          property: r'encryptedKey',
+          lower: lower,
+          includeLower: includeLower,
+          upper: upper,
+          includeUpper: includeUpper,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<FileCollectionKey, FileCollectionKey, QAfterFilterCondition>
+  encryptedKeyStartsWith(String value, {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.startsWith(
+          property: r'encryptedKey',
+          value: value,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<FileCollectionKey, FileCollectionKey, QAfterFilterCondition>
+  encryptedKeyEndsWith(String value, {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.endsWith(
+          property: r'encryptedKey',
+          value: value,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<FileCollectionKey, FileCollectionKey, QAfterFilterCondition>
+  encryptedKeyContains(String value, {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.contains(
+          property: r'encryptedKey',
+          value: value,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<FileCollectionKey, FileCollectionKey, QAfterFilterCondition>
+  encryptedKeyMatches(String pattern, {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.matches(
+          property: r'encryptedKey',
+          wildcard: pattern,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<FileCollectionKey, FileCollectionKey, QAfterFilterCondition>
+  encryptedKeyIsEmpty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.equalTo(property: r'encryptedKey', value: ''),
+      );
+    });
+  }
+
+  QueryBuilder<FileCollectionKey, FileCollectionKey, QAfterFilterCondition>
+  encryptedKeyIsNotEmpty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.greaterThan(property: r'encryptedKey', value: ''),
+      );
+    });
+  }
+
+  QueryBuilder<FileCollectionKey, FileCollectionKey, QAfterFilterCondition>
+  keyDecryptionNonceIsNull() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        const FilterCondition.isNull(property: r'keyDecryptionNonce'),
+      );
+    });
+  }
+
+  QueryBuilder<FileCollectionKey, FileCollectionKey, QAfterFilterCondition>
+  keyDecryptionNonceIsNotNull() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        const FilterCondition.isNotNull(property: r'keyDecryptionNonce'),
+      );
+    });
+  }
+
+  QueryBuilder<FileCollectionKey, FileCollectionKey, QAfterFilterCondition>
+  keyDecryptionNonceEqualTo(String? value, {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.equalTo(
+          property: r'keyDecryptionNonce',
+          value: value,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<FileCollectionKey, FileCollectionKey, QAfterFilterCondition>
+  keyDecryptionNonceGreaterThan(
+    String? value, {
+    bool include = false,
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.greaterThan(
+          include: include,
+          property: r'keyDecryptionNonce',
+          value: value,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<FileCollectionKey, FileCollectionKey, QAfterFilterCondition>
+  keyDecryptionNonceLessThan(
+    String? value, {
+    bool include = false,
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.lessThan(
+          include: include,
+          property: r'keyDecryptionNonce',
+          value: value,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<FileCollectionKey, FileCollectionKey, QAfterFilterCondition>
+  keyDecryptionNonceBetween(
+    String? lower,
+    String? upper, {
+    bool includeLower = true,
+    bool includeUpper = true,
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.between(
+          property: r'keyDecryptionNonce',
+          lower: lower,
+          includeLower: includeLower,
+          upper: upper,
+          includeUpper: includeUpper,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<FileCollectionKey, FileCollectionKey, QAfterFilterCondition>
+  keyDecryptionNonceStartsWith(String value, {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.startsWith(
+          property: r'keyDecryptionNonce',
+          value: value,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<FileCollectionKey, FileCollectionKey, QAfterFilterCondition>
+  keyDecryptionNonceEndsWith(String value, {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.endsWith(
+          property: r'keyDecryptionNonce',
+          value: value,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<FileCollectionKey, FileCollectionKey, QAfterFilterCondition>
+  keyDecryptionNonceContains(String value, {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.contains(
+          property: r'keyDecryptionNonce',
+          value: value,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<FileCollectionKey, FileCollectionKey, QAfterFilterCondition>
+  keyDecryptionNonceMatches(String pattern, {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.matches(
+          property: r'keyDecryptionNonce',
+          wildcard: pattern,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<FileCollectionKey, FileCollectionKey, QAfterFilterCondition>
+  keyDecryptionNonceIsEmpty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.equalTo(property: r'keyDecryptionNonce', value: ''),
+      );
+    });
+  }
+
+  QueryBuilder<FileCollectionKey, FileCollectionKey, QAfterFilterCondition>
+  keyDecryptionNonceIsNotEmpty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.greaterThan(property: r'keyDecryptionNonce', value: ''),
+      );
+    });
+  }
+}
+
+extension FileCollectionKeyQueryObject
+    on QueryBuilder<FileCollectionKey, FileCollectionKey, QFilterCondition> {}

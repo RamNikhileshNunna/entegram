@@ -16,6 +16,11 @@ class EnteFile {
   @Index()
   late int collectionID;
 
+  /// Active album links and their wrapped file keys. A collection tombstone
+  /// removes one link, not the shared library file. Empty on legacy rows until
+  /// the v3 archive replay has verified their memberships.
+  List<FileCollectionKey> collectionKeys = [];
+
   late int ownerID;
 
   String? title;
@@ -65,4 +70,13 @@ class EnteFile {
 
   /// XChaCha20 secretstream header for the encrypted full file (base64).
   String? fileDecryptionHeader;
+}
+
+/// The same file key wrapped separately for each album. Only ciphertext is
+/// persisted, so a surviving album remains decryptable when another is removed.
+@embedded
+class FileCollectionKey {
+  int collectionID = 0;
+  String? encryptedKey;
+  String? keyDecryptionNonce;
 }

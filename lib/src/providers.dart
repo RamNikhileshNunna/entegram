@@ -5,6 +5,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:isar_community/isar.dart';
+import 'package:pointycastle/digests/sha256.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'auth/auth_models.dart';
@@ -17,6 +18,7 @@ import 'db/models/person.dart';
 import 'media/full_res_service.dart';
 import 'media/thumbnail_service.dart';
 import 'memories/memory_mapper.dart';
+import 'memories/memory_catalog.dart';
 import 'network/ente_api.dart';
 import 'sync/crypto_isolate.dart';
 import 'sync/sync_service.dart';
@@ -24,19 +26,14 @@ import 'sync/sync_service.dart';
 /// The local database — the single source of truth the UI reads from.
 final isarDbProvider = FutureProvider<IsarDb>((ref) => IsarDb.open());
 
-/// The remote ID of the account owner (used to filter "self" chips from feed).
-/// Written by MemoryMapper after self-detection; null until first rebuild.
-/// Synchronous because sharedPreferencesProvider is preloaded before runApp.
-final selfRemoteIdProvider = Provider<String?>((ref) {
-  return ref.watch(sharedPreferencesProvider).getString(kSelfRemoteIdPref);
-});
-
 /// Preloaded SharedPreferences instance. Overridden in main() before runApp so
 /// both EndpointController and SessionNotifier can read it synchronously in
 /// their build() methods — eliminating the async race where bootstrap started
 /// against the wrong endpoint before the saved URL was loaded.
 final sharedPreferencesProvider = Provider<SharedPreferences>((ref) {
-  throw UnimplementedError('sharedPreferencesProvider must be overridden in main()');
+  throw UnimplementedError(
+    'sharedPreferencesProvider must be overridden in main()',
+  );
 });
 
 /// The Ente server endpoint. Defaults to the official api.ente.io and can be
@@ -101,6 +98,7 @@ const _kUserID = 'session_user_id';
 /// preloaded sharedPreferencesProvider so session is available immediately
 /// (no async race with endpoint or bootstrap).
 class SessionNotifier extends Notifier<Session?> {
+  Future<void>? _signingOut;
   @override
   Session? build() {
     final prefs = ref.watch(sharedPreferencesProvider);
@@ -129,20 +127,51 @@ class SessionNotifier extends Notifier<Session?> {
     await prefs.setInt(_kUserID, session.userID);
   }
 
-  Future<void> logout() async {
-    state = null;
+  Future<void> logout() {
+    if (_signingOut != null) return _signingOut!;
+    final future = _logout();
+    _signingOut = future;
+    future.whenComplete(() => _signingOut = null).ignore();
+    return future;
+  }
+
+  Future<void> _logout() async {
+    final controller = ref.read(syncControllerProvider).value;
+    controller?.dispose();
+    await controller?.drain();
+    try {
+      await controller?.clearMedia();
+    } catch (e) {
+      debugPrint('[media] cache cleanup: $e');
+    }
     final prefs = ref.read(sharedPreferencesProvider);
     for (final k in [_kToken, _kMasterKey, _kSecretKey, _kPublicKey]) {
       await prefs.remove(k);
     }
     await prefs.remove(_kUserID);
-    final db = await ref.read(isarDbProvider.future);
-    await db.isar.writeTxn(() async {
-      await db.isar.enteFiles.clear();
-      await db.isar.enteCollections.clear();
-      await db.isar.persons.clear();
-      await db.isar.memoryClusters.clear();
-    });
+    await prefs.remove(kSelfRemoteIdPref);
+    for (final key
+        in prefs
+            .getKeys()
+            .where(
+              (k) =>
+                  k.startsWith('seen_stories_v2:') ||
+                  k.startsWith('files_cursor_'),
+            )
+            .toList()) {
+      await prefs.remove(key);
+    }
+    try {
+      final db = await ref.read(isarDbProvider.future);
+      await db.isar.writeTxn(() async {
+        await db.isar.enteFiles.clear();
+        await db.isar.enteCollections.clear();
+        await db.isar.persons.clear();
+        await db.isar.memoryClusters.clear();
+      });
+    } finally {
+      state = null;
+    }
   }
 }
 
@@ -187,15 +216,18 @@ class LoginController extends Notifier<LoginUiState> {
     }
     state = const LoginSubmitting();
     try {
-      final result = await ref.read(authServiceProvider).login(
-        email: email,
-        password: password,
-      );
+      final result = await ref
+          .read(authServiceProvider)
+          .login(email: email, password: password);
       switch (result) {
         case LoginSuccess(:final session):
           await ref.read(sessionProvider.notifier).set(session);
           state = const LoginIdle();
-        case LoginTwoFactorRequired(:final sessionID, :final kek, :final isPasskey):
+        case LoginTwoFactorRequired(
+          :final sessionID,
+          :final kek,
+          :final isPasskey,
+        ):
           if (isPasskey) {
             state = const LoginIdle(
               'Passkey 2FA isn\'t supported yet. Use an authenticator app or '
@@ -223,11 +255,9 @@ class LoginController extends Notifier<LoginUiState> {
     }
     state = const LoginSubmitting();
     try {
-      final session = await ref.read(authServiceProvider).verifyTotp(
-        sessionID: sessionID,
-        code: code.trim(),
-        kek: kek,
-      );
+      final session = await ref
+          .read(authServiceProvider)
+          .verifyTotp(sessionID: sessionID, code: code.trim(), kek: kek);
       await ref.read(sessionProvider.notifier).set(session);
       _sessionID = null;
       _kek = null;
@@ -265,8 +295,9 @@ class LoginController extends Notifier<LoginUiState> {
   }
 }
 
-final loginControllerProvider =
-    NotifierProvider<LoginController, LoginUiState>(LoginController.new);
+final loginControllerProvider = NotifierProvider<LoginController, LoginUiState>(
+  LoginController.new,
+);
 
 /// The reactive feed of memories. The UI watches this; the background pipeline
 /// writes [MemoryCluster]s into Isar and the stream pushes updates here.
@@ -277,19 +308,87 @@ final memoriesProvider = StreamProvider<List<MemoryCluster>>((ref) async* {
   yield* db.isar.memoryClusters.where().watch(fireImmediately: true);
 });
 
-/// Stories bar: all memory kinds — people sessions/spotlight/last-time,
-/// on-this-day (including recent "last week" etc.), and year/season summaries.
-final storiesMemoriesProvider = StreamProvider<List<MemoryCluster>>((ref) async* {
-  final db = await ref.watch(isarDbProvider.future);
-  yield* db.isar.memoryClusters
-      .filter()
-      .kindEqualTo(MemoryKind.people)
-      .or()
-      .kindEqualTo(MemoryKind.onThisDay)
-      .or()
-      .kindEqualTo(MemoryKind.trip)
-      .watch(fireImmediately: true);
+/// One local calendar-day value; curation refreshes even across a midnight.
+final memoryDayProvider = Provider<DateTime>((ref) {
+  final now = DateTime.now();
+  final day = DateTime(now.year, now.month, now.day);
+  final timer = Timer(
+    DateTime(now.year, now.month, now.day + 1).difference(now),
+    ref.invalidateSelf,
+  );
+  ref.onDispose(timer.cancel);
+  return day;
 });
+
+final storiesMemoriesProvider = Provider<AsyncValue<List<MemoryCluster>>>((
+  ref,
+) {
+  final day = ref.watch(memoryDayProvider);
+  return ref
+      .watch(memoriesProvider)
+      .whenData((memories) => curateMemories(memories, day, limit: 10));
+});
+
+class MemoryFeedController extends Notifier<List<MemoryCluster>> {
+  List<MemoryCluster> _previous = [];
+  @override
+  List<MemoryCluster> build() {
+    final incoming = ref.watch(memoriesProvider).value;
+    final day = ref.watch(memoryDayProvider);
+    if (incoming == null) return _previous;
+    return _previous = reconcileMemories(
+      _previous,
+      curateMemories(incoming, day),
+    );
+  }
+
+  void reorder() {
+    _previous = curateMemories(
+      ref.read(memoriesProvider).value ?? [],
+      ref.read(memoryDayProvider),
+    );
+    state = _previous;
+  }
+}
+
+final memoryFeedProvider =
+    NotifierProvider<MemoryFeedController, List<MemoryCluster>>(
+      MemoryFeedController.new,
+    );
+
+class SeenStories extends Notifier<Map<String, String>> {
+  late String _key;
+  @override
+  Map<String, String> build() {
+    final prefs = ref.watch(sharedPreferencesProvider);
+    final session = ref.watch(sessionProvider);
+    _key =
+        'seen_stories_v2:${ref.watch(endpointProvider)}:${session?.userID ?? 0}:${session == null ? "" : base64Url.encode(session.publicKey)}';
+    try {
+      return Map<String, String>.from(
+        jsonDecode(prefs.getString(_key) ?? '{}') as Map,
+      );
+    } catch (_) {
+      return {};
+    }
+  }
+
+  void mark(MemoryCluster memory) {
+    final updated = Map<String, String>.from(state)..remove(memory.signature);
+    updated[memory.signature] = memory.storyFingerprint;
+    while (updated.length > 200) {
+      updated.remove(updated.keys.first);
+    }
+    state = updated;
+    unawaited(
+      ref.read(sharedPreferencesProvider).setString(_key, jsonEncode(updated)),
+    );
+  }
+}
+
+final seenStoriesProvider = NotifierProvider<SeenStories, Map<String, String>>(
+  SeenStories.new,
+);
 
 /// Owns the decryption isolate + sync orchestration for the logged-in session.
 final syncControllerProvider = FutureProvider<SyncController?>((ref) async {
@@ -300,6 +399,7 @@ final syncControllerProvider = FutureProvider<SyncController?>((ref) async {
     api: ref.watch(enteApiProvider),
     db: db,
     session: session,
+    preferences: ref.read(sharedPreferencesProvider),
   );
   ref.onDispose(controller.dispose);
   await controller.init();
@@ -320,6 +420,7 @@ final fullResServiceProvider = Provider<FullResService?>(
 /// build) once the controller is ready. The feed watches this for its initial
 /// loading state.
 final bootstrapProvider = FutureProvider<void>((ref) async {
+  ref.watch(memoryDayProvider);
   final controller = await ref.watch(syncControllerProvider.future);
   if (controller != null) await controller.bootstrap();
 });
@@ -335,263 +436,259 @@ final loadMoreProvider = Provider<Future<bool> Function()>((ref) {
   };
 });
 
-/// Named people detected in the file with [fileId]. Returns only persons that
-/// have a non-empty name; unnamed clusters are omitted.
-///
-/// StreamProvider so it automatically re-emits when the persons table is
-/// written (i.e. after syncPersons() completes) — chips appear without a
-/// restart even if persons arrived after the first render.
-final personsForFileProvider = StreamProvider
-    .family<List<Person>, int>((ref, fileId) async* {
+/// Shared people index: one stream and one inversion instead of a database
+/// scan (and multiple queries per face) for every visible photo.
+final namedPeopleProvider = StreamProvider<List<Person>>((ref) async* {
   final db = await ref.watch(isarDbProvider.future);
-
-  Future<List<Person>> query() async {
-    final file = await db.isar.enteFiles.get(fileId);
-    final personIds = file?.personIds ?? const [];
-
-    bool keep(Person p) => !p.isDeleted && (p.name?.isNotEmpty ?? false);
-
-    if (personIds.isNotEmpty) {
-      final result = <Person>[];
-      for (final pid in personIds) {
-        final p = await db.isar.persons.filter().remoteIDEqualTo(pid).findFirst();
-        if (p != null && keep(p)) result.add(p);
-      }
-      return result;
-    }
-
-    // Fallback: scan persons whose fileIds include this file
-    final all = await db.isar.persons.filter().isDeletedEqualTo(false).findAll();
-    return all.where((p) => keep(p) && p.fileIds.contains(fileId)).toList();
-  }
-
-  await for (final _ in db.isar.persons
+  yield* db.isar.persons
       .filter()
       .isDeletedEqualTo(false)
-      .watchLazy(fireImmediately: true)) {
-    yield await query();
-  }
+      .isHiddenEqualTo(false)
+      .watch(fireImmediately: true);
 });
-
-/// Looks up named persons by their comma-joined remote IDs. Used by people-kind
-/// memories to show the same chips on every photo regardless of per-photo face data.
-/// StreamProvider so chips auto-update when syncPersons() writes to Isar.
-final personsForRemoteIdsProvider = StreamProvider
-    .family<List<Person>, String>((ref, idsKey) async* {
-  if (idsKey.isEmpty) { yield const []; return; }
-  final db = await ref.watch(isarDbProvider.future);
-  final ids = idsKey.split(',');
-
-  Future<List<Person>> query() async {
-    final result = <Person>[];
-    for (final id in ids) {
-      final p = await db.isar.persons.filter().remoteIDEqualTo(id).findFirst();
-      if (p != null && !p.isDeleted && (p.name?.isNotEmpty ?? false)) {
-        result.add(p);
-      }
-    }
-    return result;
-  }
-
-  await for (final _ in db.isar.persons
-      .filter()
-      .isDeletedEqualTo(false)
-      .watchLazy(fireImmediately: true)) {
-    yield await query();
-  }
-});
-
-/// The (capture-time ascending) files that make up a memory, looked up by the
-/// memory's Isar id.
-final memoryFilesProvider = FutureProvider.family<List<EnteFile>, int>((
+final peopleByFileProvider = Provider<AsyncValue<Map<int, List<Person>>>>((
   ref,
-  memoryDbId,
-) async {
-  final db = await ref.watch(isarDbProvider.future);
-  final memory = await db.isar.memoryClusters.get(memoryDbId);
-  if (memory == null) return const [];
-  final files = await db.isar.enteFiles.getAll(memory.fileIds);
-  return files.whereType<EnteFile>().where((f) => !f.isDeleted).toList()
-    ..sort((a, b) => a.creationTime.compareTo(b.creationTime));
+) {
+  return ref.watch(namedPeopleProvider).whenData((people) {
+    final index = <int, List<Person>>{};
+    for (final person in people) {
+      if (person.name?.trim().isEmpty ?? true) continue;
+      for (final id in person.fileIds.toSet()) {
+        index.putIfAbsent(id, () => []).add(person);
+      }
+    }
+    return index;
+  });
 });
+final personsForFileProvider = Provider.family<AsyncValue<List<Person>>, int>(
+  (ref, fileId) => ref
+      .watch(peopleByFileProvider)
+      .whenData((people) => people[fileId] ?? []),
+);
+final personsForRemoteIdsProvider =
+    Provider.family<AsyncValue<List<Person>>, String>(
+      (ref, ids) => ref.watch(namedPeopleProvider).whenData((people) {
+        final selected = ids.split(',').toSet();
+        return people
+            .where(
+              (p) =>
+                  selected.contains(p.remoteID) &&
+                  (p.name?.trim().isNotEmpty ?? false),
+            )
+            .toList();
+      }),
+    );
 
-/// Glue around [SyncService] + [MemoryMapper] with a simple "load more" entry
-/// point for the feed's infinite scroll.
+/// Both memory edits and file edits invalidate the resolved slides. Keep their
+/// curated order, and release subscriptions when the card/viewer goes away.
+final memoryFilesProvider = StreamProvider.autoDispose
+    .family<List<EnteFile>, int>((ref, id) async* {
+      final db = await ref.watch(isarDbProvider.future);
+      if (!ref.mounted) return;
+      final changes = StreamController<void>();
+      final memorySub = db.isar.memoryClusters
+          .watchObject(id, fireImmediately: true)
+          .listen((_) => changes.add(null));
+      final filesSub = db.isar.enteFiles.watchLazy().listen(
+        (_) => changes.add(null),
+      );
+      ref.onDispose(() {
+        unawaited(memorySub.cancel());
+        unawaited(filesSub.cancel());
+        unawaited(changes.close());
+      });
+      await for (final _ in changes.stream) {
+        final memory = await db.isar.memoryClusters.get(id);
+        if (memory == null) {
+          yield [];
+          continue;
+        }
+        final files = await db.isar.enteFiles.getAll(memory.fileIds);
+        yield files.whereType<EnteFile>().where((f) => !f.isDeleted).toList();
+      }
+    });
+
+/// Serializes cursor mutations, coalesces refreshes, and batches off-thread
+/// curation while the archive fills. A busy pager never reports exhaustion.
 class SyncController {
   SyncController({
     required EnteApi api,
     required IsarDb db,
     required Session session,
+    required SharedPreferences preferences,
   }) : _api = api,
        _db = db,
-       _session = session;
-
+       _session = session,
+       _preferences = preferences;
   final EnteApi _api;
   final IsarDb _db;
   final Session _session;
-
-  late final CryptoIsolate _crypto;
-  late final SyncService _sync;
-  late final MemoryMapper _mapper;
-  late final ThumbnailService _thumbnails;
-  late final FullResService _fullRes;
-
+  final SharedPreferences _preferences;
+  CryptoIsolate? _crypto;
+  late SyncService _sync;
+  late MemoryMapper _mapper;
+  late ThumbnailService _thumbnails;
+  late FullResService _fullRes;
   ThumbnailService get thumbnails => _thumbnails;
   FullResService get fullRes => _fullRes;
-
-  bool _loading = false;
   bool _disposed = false;
+  bool _initialized = false;
   bool _backgroundSyncRunning = false;
+  Future<void> _queue = Future.value();
+  Future<void>? _bootstrap;
+  Future<bool>? _page;
+
+  Future<T> _serial<T>(Future<T> Function() action) {
+    final result = _queue.then((_) {
+      if (_disposed) throw StateError('Sync stopped');
+      return action();
+    });
+    _queue = result.then<void>((_) {}, onError: (Object _, StackTrace _) {});
+    return result;
+  }
 
   Future<void> init() async {
     _api.authToken = _session.token;
-    _crypto = await CryptoIsolate.spawn(
+    final crypto = await CryptoIsolate.spawn(
       masterKey: _session.masterKey,
       secretKey: _session.secretKey,
       publicKey: _session.publicKey,
       currentUserID: _session.userID,
     );
-    _sync = SyncService(api: _api, db: _db, crypto: _crypto);
+    if (_disposed) {
+      crypto.dispose();
+      return;
+    }
+    _crypto = crypto;
+    _sync = SyncService(
+      api: _api,
+      db: _db,
+      crypto: crypto,
+      preferences: _preferences,
+      cursorNamespace:
+          '${_api.baseUrl}:${base64Url.encode(_session.publicKey)}',
+    );
     _mapper = MemoryMapper(_db);
-    _thumbnails = ThumbnailService(api: _api, crypto: _crypto);
-    _fullRes = FullResService(api: _api, crypto: _crypto);
-
-    // Re-prime the isolate's collection-key cache from any already-synced
-    // collections so thumbnails decrypt immediately after a cold start.
+    final account = SHA256Digest().process(
+      Uint8List.fromList(
+        utf8.encode('${_api.baseUrl}:${base64Url.encode(_session.publicKey)}'),
+      ),
+    );
+    final namespace = account
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join();
+    _thumbnails = ThumbnailService(
+      api: _api,
+      crypto: crypto,
+      cacheNamespace: namespace,
+    );
+    _fullRes = FullResService(
+      api: _api,
+      crypto: crypto,
+      cacheNamespace: namespace,
+    );
+    _initialized = true;
     final known = await _db.isar.enteCollections
         .filter()
         .isDeletedEqualTo(false)
         .findAll();
-    if (known.isNotEmpty) {
-      await _crypto.primeCollectionKeys([
-        for (final c in known)
-          if (c.encryptedKey != null)
-            {
-              'id': c.collectionID,
-              'isOwned': c.isOwned,
-              'encryptedKey': c.encryptedKey,
-              'keyDecryptionNonce': c.keyDecryptionNonce,
-            },
-      ]);
-    }
+    if (_disposed) return;
+    await crypto.primeCollectionKeys([
+      for (final c in known)
+        if (c.encryptedKey != null)
+          {
+            'id': c.collectionID,
+            'isOwned': c.isOwned,
+            'encryptedKey': c.encryptedKey,
+            'keyDecryptionNonce': c.keyDecryptionNonce,
+          },
+    ]);
   }
 
-  /// Initial sync: collections + people + first page, then build memories.
-  /// Each phase is logged (visible in `flutter logs`/logcat) with its outcome
-  /// so failures are diagnosable on-device.
-  Future<void> bootstrap() async {
-    debugPrint('[sync] bootstrap: start (endpoint ${_api.baseUrl})');
-    await _phase('collections', () async {
+  Future<void> bootstrap() {
+    if (_bootstrap != null) return _bootstrap!;
+    final future = _serial(() async {
+      // Offline/cached libraries get today's memories before any network wait.
+      await _mapper.rebuild();
+      if (_disposed) return;
       await _sync.syncCollections();
+      try {
+        await _sync.syncPersons();
+      } catch (e) {
+        debugPrint('[sync] people unavailable: $e');
+      }
+      if (_disposed) return;
+      await _sync.syncRecentFiles(maxPages: 3);
+      await _sync.syncNextFilesPage(prioritizeRecent: false);
+      if (!_disposed) await _mapper.rebuild();
     });
-    try {
-      await _phase('persons', () async {
-        final n = await _sync.syncPersons();
-        debugPrint('[sync] persons synced: $n');
-      });
-    } catch (_) {}
-    await _phase('files (recent)', () async {
-      final p = await _sync.syncRecentFiles();
-      debugPrint('[sync] recent: +${p.insertedFiles} files synced');
-    });
-    await _phase('files (first page)', () async {
-      final p = await _sync.syncNextFilesPage();
-      debugPrint('[sync] first page: +${p.insertedFiles} files, hasMore=${p.hasMore}');
-    });
-    try {
-      await _phase('memories', () async {
-        final m = await _mapper.rebuild();
-        debugPrint('[sync] memories built: $m');
-      });
-    } catch (_) {}
-    debugPrint('[sync] bootstrap: done');
-    // Keep syncing the rest of the library in the background so older memories
-    // (years ago, seasons, "this month N years ago") appear on their own,
-    // without the user having to scroll to page the whole archive in.
-    unawaited(backgroundSync());
+    _bootstrap = future;
+    future.whenComplete(() {
+      _bootstrap = null;
+      if (!_disposed) unawaited(backgroundSync());
+    }).ignore();
+    return future;
   }
 
-  /// Pages the remainder of the library after bootstrap, rebuilding memories
-  /// every few pages so older flashbacks surface progressively. Yields to any
-  /// user-driven [loadMore] via the shared `_loading` guard.
   Future<void> backgroundSync() async {
-    if (_backgroundSyncRunning) return;
+    if (_backgroundSyncRunning || _disposed) return;
     _backgroundSyncRunning = true;
-    debugPrint('[sync] background sync: start');
+    var changed = false;
+    var pages = 0;
+    var lastBuild = DateTime.now();
     try {
-      // Let the first screen + its thumbnails settle before we start paging the
-      // archive — otherwise the heavy decrypt/rebuild work competes with the
-      // initial render and the app feels sluggish on launch.
-      await Future.delayed(const Duration(seconds: 4));
-
-      var pages = 0;
-      var insertedSinceRebuild = 0;
+      await Future<void>.delayed(const Duration(seconds: 1));
       while (!_disposed) {
-        if (_loading) {
-          await Future.delayed(const Duration(milliseconds: 200));
-          continue;
-        }
-        _loading = true;
-        SyncProgress progress;
-        try {
-          progress = await _sync.syncNextFilesPage();
-        } catch (e) {
-          debugPrint('[sync] background page failed: $e');
-          _loading = false;
-          await Future.delayed(const Duration(seconds: 2));
-          continue;
-        }
-        _loading = false;
+        final progress = await _serial(_sync.syncNextFilesPage);
         if (_disposed) break;
-
-        insertedSinceRebuild += progress.insertedFiles;
+        changed = changed || progress.changedFiles > 0;
         pages++;
-        // Rebuild periodically (not every page) so new memories appear as we go
-        // without thrashing on the full-library scan each page.
-        if (insertedSinceRebuild > 0 && pages % 12 == 0) {
+        if (changed &&
+            (pages % 6 == 0 ||
+                DateTime.now().difference(lastBuild).inSeconds >= 8)) {
           await _mapper.rebuild();
-          insertedSinceRebuild = 0;
+          changed = false;
+          lastBuild = DateTime.now();
         }
         if (!progress.hasMore) break;
-        // Pace pages so the UI thread stays responsive while scrolling/viewing.
-        await Future.delayed(const Duration(milliseconds: 120));
+        await Future<void>.delayed(const Duration(milliseconds: 100));
       }
-      if (!_disposed && insertedSinceRebuild > 0) await _mapper.rebuild();
-      debugPrint('[sync] background sync: done');
+      if (!_disposed && changed) await _mapper.rebuild();
+    } catch (e) {
+      if (!_disposed) debugPrint('[sync] archive paused; pull to retry: $e');
     } finally {
       _backgroundSyncRunning = false;
     }
   }
 
-  Future<void> _phase(String name, Future<void> Function() body) async {
-    debugPrint('[sync] $name: start');
-    try {
-      await body();
-      debugPrint('[sync] $name: ok');
-    } catch (e, s) {
-      debugPrint('[sync] $name: FAILED: $e\n$s');
-      rethrow;
-    }
+  Future<bool> loadMore() {
+    if (_page != null) return _page!;
+    final future = _serial(() async {
+      final progress = await _sync.syncNextFilesPage();
+      if (!_disposed && progress.changedFiles > 0) await _mapper.rebuild();
+      return progress.hasMore;
+    });
+    _page = future;
+    future.whenComplete(() => _page = null).ignore();
+    return future;
   }
 
-  /// Fetch + decrypt + persist one more page, then refresh memories. Called by
-  /// the scroll controller as the feed nears its end.
-  Future<bool> loadMore() async {
-    if (_loading) return false;
-    _loading = true;
-    try {
-      final progress = await _sync.syncNextFilesPage();
-      if (progress.insertedFiles > 0) {
-        await _mapper.rebuild();
-      }
-      return progress.hasMore;
-    } finally {
-      _loading = false;
-    }
+  Future<void> drain() async {
+    await _queue;
+    if (_initialized) await _mapper.waitUntilIdle();
+  }
+
+  Future<void> clearMedia() async {
+    if (!_initialized) return;
+    await Future.wait([_thumbnails.clearCache(), _fullRes.clearCache()]);
   }
 
   void dispose() {
     _disposed = true;
-    _crypto.dispose();
+    if (_initialized) {
+      _thumbnails.dispose();
+      _fullRes.dispose();
+    }
+    _crypto?.dispose();
   }
 }

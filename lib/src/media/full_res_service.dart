@@ -24,16 +24,23 @@ class ImageDownloadCancelledException implements Exception {
 /// to receive download/decrypt events; subscribe via [videoProgressStream].
 /// Values 0..1 = download percentage; exactly 1.0 = decrypting phase.
 class FullResService {
-  FullResService({required EnteApi api, required CryptoIsolate crypto})
-    : _api = api,
-      _crypto = crypto;
+  FullResService({
+    required EnteApi api,
+    required CryptoIsolate crypto,
+    this.cacheNamespace = 'default',
+  }) : _api = api,
+       _crypto = crypto;
 
+  final String cacheNamespace;
+  bool _disposed = false;
+  int _imageBytes = 0;
+  static const _maxImageBytes = 64 * 1024 * 1024;
   final EnteApi _api;
   final CryptoIsolate _crypto;
 
-  // 50-entry memory LRU — enough to keep the current story bundle warm while
-  // the user swipes through slides, without excessive RAM usage.
-  static const int _kMaxImages = 50;
+  // Bound compressed originals by both count and bytes; a few large camera
+  // files must not retain hundreds of megabytes between story slides.
+  static const int _kMaxImages = 12;
   final _imageCache = <int, Uint8List>{};
   final Map<int, String> _videoCache = {};
   final Map<int, Future<Uint8List>> _imageInflight = {};
@@ -48,7 +55,7 @@ class FullResService {
   Future<Directory> _dir() async {
     if (_imageCacheDir != null) return _imageCacheDir!;
     final base = await getApplicationCacheDirectory();
-    final dir = Directory('${base.path}/fullres');
+    final dir = Directory('${base.path}/fullres/$cacheNamespace');
     if (!dir.existsSync()) dir.createSync(recursive: true);
     return _imageCacheDir = dir;
   }
@@ -62,10 +69,46 @@ class FullResService {
   final Map<int, StreamController<double>> _imageProgressControllers = {};
 
   void _imagePut(int id, Uint8List bytes) {
-    _imageCache.remove(id);
+    if (_disposed || bytes.length > _maxImageBytes) return;
+    _imageBytes -= _imageCache.remove(id)?.length ?? 0;
     _imageCache[id] = bytes;
-    if (_imageCache.length > _kMaxImages) {
-      _imageCache.remove(_imageCache.keys.first);
+    _imageBytes += bytes.length;
+    while (_imageCache.length > _kMaxImages || _imageBytes > _maxImageBytes) {
+      _imageBytes -= _imageCache.remove(_imageCache.keys.first)!.length;
+    }
+  }
+
+  void dispose() {
+    _disposed = true;
+    for (final token in _imageCancelTokens.values) {
+      token.cancel();
+    }
+    _imageCache.clear();
+    _videoCache.clear();
+    _imageBytes = 0;
+  }
+
+  Future<void> clearCache() async {
+    dispose();
+    final directory = await _dir();
+    if (await directory.exists()) await directory.delete(recursive: true);
+    final legacy = directory.parent;
+    if (await legacy.exists()) {
+      await for (final entry in legacy.list(followLinks: false)) {
+        if (entry is File) await entry.delete();
+      }
+    }
+    final temporary = await getTemporaryDirectory();
+    final videos = Directory('${temporary.path}/entegram/$cacheNamespace');
+    if (await videos.exists()) await videos.delete(recursive: true);
+    await for (final entry in temporary.list(followLinks: false)) {
+      final name = entry.path.split(Platform.pathSeparator).last;
+      if (entry is File &&
+          (name.startsWith('ente_enc_') ||
+              name.startsWith('ente_vid_') ||
+              name == 'entegram_share.jpg')) {
+        await entry.delete();
+      }
     }
   }
 
@@ -124,6 +167,7 @@ class FullResService {
 
   /// Returns decrypted image bytes for [file]. LRU-cached in memory.
   Future<Uint8List> getImageBytes(EnteFile file) {
+    if (_disposed) return Future.error(StateError('Media session ended'));
     final hit = _imageCache[file.id];
     if (hit != null) {
       _imageCache.remove(file.id);
@@ -173,6 +217,7 @@ class FullResService {
                   }
                 },
         );
+        if (_disposed) throw StateError('Media session ended');
         final bytes = await _crypto.decryptFileContent(
           collectionID: file.collectionID,
           encryptedFileKeyB64: file.encryptedKey!,
@@ -182,7 +227,7 @@ class FullResService {
         );
         _imagePut(file.id, bytes);
         // Write to disk cache in background — don't block the caller.
-        cached.writeAsBytes(bytes, flush: true).ignore();
+        if (!_disposed) await cached.writeAsBytes(bytes, flush: true);
         return bytes;
       } on DioException catch (e) {
         if (e.type == DioExceptionType.cancel) {
@@ -232,7 +277,11 @@ class FullResService {
   /// Subscribe to [videoProgressStream] before calling this to receive progress.
   Future<String> getVideoPath(EnteFile file) {
     final hit = _videoCache[file.id];
-    if (hit != null && File(hit).existsSync()) return Future.value(hit);
+    if (_disposed) return Future.error(StateError('Media session ended'));
+    if (hit != null && File(hit).existsSync()) {
+      _progressControllers.remove(file.id)?.close();
+      return Future.value(hit);
+    }
     var f = _videoInflight[file.id];
     if (f == null) {
       f = _fetchVideo(file);
@@ -246,8 +295,10 @@ class FullResService {
     debugPrint('[fullres] streaming video ${file.id}');
     final dir = await getTemporaryDirectory();
     final ext = _videoExt(file.title);
-    final encPath = '${dir.path}/ente_enc_${file.id}';
-    final decPath = '${dir.path}/ente_vid_${file.id}.$ext';
+    final videoDir = Directory('${dir.path}/entegram/$cacheNamespace');
+    await videoDir.create(recursive: true);
+    final encPath = '${videoDir.path}/enc_${file.id}';
+    final decPath = '${videoDir.path}/vid_${file.id}.$ext';
     final progressCtrl = _progressControllers[file.id];
     try {
       await _api.downloadFileToDisk(
@@ -266,6 +317,7 @@ class FullResService {
       if (progressCtrl != null && !progressCtrl.isClosed) {
         progressCtrl.add(1.0);
       }
+      if (_disposed) throw StateError('Media session ended');
       await _crypto.decryptFileToDisk(
         collectionID: file.collectionID,
         encryptedFileKeyB64: file.encryptedKey!,
@@ -274,6 +326,10 @@ class FullResService {
         inputPath: encPath,
         outputPath: decPath,
       );
+      if (_disposed) {
+        await File(decPath).delete();
+        throw StateError('Media session ended');
+      }
       _videoCache[file.id] = decPath;
       return decPath;
     } finally {
@@ -301,6 +357,9 @@ class FullResService {
   static String _videoExt(String? title) {
     if (title == null) return 'mp4';
     final dot = title.lastIndexOf('.');
-    return dot >= 0 ? title.substring(dot + 1).toLowerCase() : 'mp4';
+    final ext = dot >= 0 ? title.substring(dot + 1).toLowerCase() : 'mp4';
+    return {'mp4', 'mov', 'm4v', 'webm', 'mkv', 'avi'}.contains(ext)
+        ? ext
+        : 'mp4';
   }
 }

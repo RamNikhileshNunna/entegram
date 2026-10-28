@@ -20,18 +20,25 @@ import '../sync/crypto_isolate.dart';
 /// (same limit the official Ente app uses) so the server doesn't rate-limit us
 /// when a memory with 30+ slides first loads.
 class ThumbnailService {
-  ThumbnailService({required EnteApi api, required CryptoIsolate crypto})
-    : _api = api,
-      _crypto = crypto;
+  ThumbnailService({
+    required EnteApi api,
+    required CryptoIsolate crypto,
+    this.cacheNamespace = 'default',
+  }) : _api = api,
+       _crypto = crypto;
 
+  final String cacheNamespace;
+  bool _disposed = false;
+  int _memoryBytes = 0;
+  static const _maxMemoryBytes = 24 * 1024 * 1024;
   final EnteApi _api;
   final CryptoIsolate _crypto;
 
   // LRU in-memory cache capped at _kMaxMemory entries. A LinkedHashMap is
   // insertion-ordered; on a cache hit we remove-then-reinsert to bubble the
   // entry to the "recently used" end, so the oldest entry is always first.
-  // 1000 matches the official Ente app's in-memory thumbnail LRU.
-  static const int _kMaxMemory = 1000;
+  // Count and byte budgets keep large libraries within a predictable cache size.
+  static const int _kMaxMemory = 256;
   final _memory = <int, Uint8List>{};
   final Map<int, Future<Uint8List?>> _inflight = {};
   Directory? _cacheDir;
@@ -40,7 +47,7 @@ class ThumbnailService {
   // edge-cached CDN worker (or the endpoint), which comfortably handles a high
   // fan-out, so we allow more parallelism than the old conservative limit for
   // snappier grid fills.
-  static const _maxConcurrent = 40;
+  static const _maxConcurrent = 8;
   var _activeDownloads = 0;
   final _waiters = <Completer<void>>[];
 
@@ -66,16 +73,37 @@ class ThumbnailService {
     final cached = _cacheDir;
     if (cached != null) return cached;
     final base = await getApplicationCacheDirectory();
-    final dir = Directory('${base.path}/thumbs');
+    final dir = Directory('${base.path}/thumbs/$cacheNamespace');
     if (!dir.existsSync()) dir.createSync(recursive: true);
     return _cacheDir = dir;
   }
 
   void _memoryPut(int id, Uint8List bytes) {
-    _memory.remove(id); // move to end if already present
+    if (_disposed || bytes.length > _maxMemoryBytes) return;
+    _memoryBytes -= _memory.remove(id)?.length ?? 0;
     _memory[id] = bytes;
-    if (_memory.length > _kMaxMemory) {
-      _memory.remove(_memory.keys.first); // evict oldest
+    _memoryBytes += bytes.length;
+    while (_memory.length > _kMaxMemory || _memoryBytes > _maxMemoryBytes) {
+      _memoryBytes -= _memory.remove(_memory.keys.first)!.length;
+    }
+  }
+
+  void dispose() {
+    _disposed = true;
+    _memory.clear();
+    _memoryBytes = 0;
+  }
+
+  Future<void> clearCache() async {
+    dispose();
+    final directory = await _dir();
+    if (await directory.exists()) await directory.delete(recursive: true);
+    // Older app versions used a flat cache without account namespacing.
+    final legacy = directory.parent;
+    if (await legacy.exists()) {
+      await for (final entry in legacy.list(followLinks: false)) {
+        if (entry is File) await entry.delete();
+      }
     }
   }
 
@@ -103,6 +131,7 @@ class ThumbnailService {
   /// Returns decrypted thumbnail bytes, or null if this file can't produce one
   /// (e.g. missing key material). De-duplicates concurrent requests.
   Future<Uint8List?> get(EnteFile file) {
+    if (_disposed) return Future.value(null);
     final hit = _memory[file.id];
     if (hit != null) {
       // Bubble to most-recently-used end.
@@ -148,6 +177,7 @@ class ThumbnailService {
     for (var attempt = 0; attempt < _maxRetries; attempt++) {
       await _acquireSlot();
       try {
+        if (_disposed) return null;
         encrypted = await _api.downloadThumbnail(file.id);
         break;
       } on DioException catch (e) {
@@ -163,6 +193,7 @@ class ThumbnailService {
       await Future.delayed(Duration(seconds: attempt + 1));
     }
 
+    if (_disposed) return null;
     final plain = await _crypto.decryptThumbnail(
       collectionID: file.collectionID,
       encryptedFileKeyB64: encryptedKey,
@@ -171,6 +202,7 @@ class ThumbnailService {
       encryptedBytes: encrypted!,
     );
 
+    if (_disposed) return null;
     _memoryPut(file.id, plain);
     await cacheFile.writeAsBytes(plain, flush: true);
     return plain;

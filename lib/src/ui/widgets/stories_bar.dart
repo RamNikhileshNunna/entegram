@@ -1,147 +1,171 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../db/models/ente_file.dart';
 import '../../db/models/memory_cluster.dart';
+import '../../memories/memory_catalog.dart';
 import '../../providers.dart';
+import 'memory_style.dart';
 import 'story_viewer.dart';
 import 'thumbnail_image.dart';
 
-class StoriesBar extends ConsumerStatefulWidget {
+class StoriesBar extends ConsumerWidget {
   const StoriesBar({super.key});
-
-  @override
-  ConsumerState<StoriesBar> createState() => _StoriesBarState();
-}
-
-class _StoriesBarState extends ConsumerState<StoriesBar> {
-  List<MemoryCluster> _shuffled = const [];
-  Set<int> _seenIds = const {};
-
-  static const int _maxStories = 10;
-
-  void _onData(List<MemoryCluster> memories) {
-    final ids = memories.map((m) => m.id).toSet();
-    if (ids.length == _seenIds.length && ids.containsAll(_seenIds)) return;
-    _seenIds = ids;
-    final mixed = List<MemoryCluster>.from(memories)..shuffle();
-    setState(() => _shuffled = mixed.take(_maxStories).toList());
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    ref.watch(storiesMemoriesProvider).whenData(_onData);
-
-    if (_shuffled.isEmpty) return const SizedBox.shrink();
-
-    return SizedBox(
-      height: 100,
-      child: ListView.builder(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 8),
-        itemCount: _shuffled.length,
-        itemBuilder: (context, i) => _StoryBubble(
-          memory: _shuffled[i],
-          onTap: () => openStoryViewer(
-            context,
-            memories: _shuffled,
-            initialMemoryIndex: i,
-            ref: ref,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _StoryBubble extends ConsumerWidget {
-  const _StoryBubble({required this.memory, required this.onTap});
-
-  final MemoryCluster memory;
-  final VoidCallback onTap;
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _CoverCircle(key: ValueKey(memory.id), memory: memory),
-            const SizedBox(height: 4),
-            SizedBox(
-              width: 64,
-              child: Text(
-                memory.title,
-                textAlign: TextAlign.center,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.labelSmall,
+    final stories =
+        ref.watch(storiesMemoriesProvider).value ?? const <MemoryCluster>[];
+    if (stories.isEmpty) return const SizedBox.shrink();
+    final seen = ref.watch(seenStoriesProvider);
+    final scale = MediaQuery.textScalerOf(context).scale(14) / 14;
+    final height = 206.0 + ((scale - 1) * 42).clamp(0, 80);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(4, 4, 4, 12),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'Rediscover',
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
               ),
-            ),
-          ],
+              const SizedBox(width: 8),
+              const Icon(
+                Icons.auto_awesome_outlined,
+                size: 18,
+                color: Color(0xFFA5D9BC),
+              ),
+            ],
+          ),
         ),
-      ),
+        SizedBox(
+          height: height,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            itemCount: stories.length,
+            separatorBuilder: (_, _) => const SizedBox(width: 12),
+            itemBuilder: (_, i) {
+              final memory = stories[i];
+              final watched = seen[memory.signature] == memory.storyFingerprint;
+              return SizedBox(
+                width: 150,
+                child: Semantics(
+                  label:
+                      '${memory.title}, ${watched ? 'viewed' : 'new'} memory',
+                  button: true,
+                  child: Material(
+                    color: const Color(0xFF25342F),
+                    borderRadius: BorderRadius.circular(22),
+                    clipBehavior: Clip.antiAlias,
+                    child: InkWell(
+                      onTap: () => openStoryViewer(
+                        context,
+                        memories: stories,
+                        initialMemoryIndex: i,
+                        ref: ref,
+                      ),
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          _Cover(memory: memory),
+                          const DecoratedBox(
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                begin: Alignment.topCenter,
+                                end: Alignment.bottomCenter,
+                                colors: [Colors.transparent, Colors.black87],
+                                stops: [0.25, 1],
+                              ),
+                            ),
+                          ),
+                          Positioned(
+                            top: 12,
+                            left: 12,
+                            child: Icon(
+                              watched
+                                  ? Icons.check_circle_outline
+                                  : memoryIcon(memory),
+                              size: 22,
+                              color: Colors.white,
+                            ),
+                          ),
+                          Positioned(
+                            left: 12,
+                            right: 12,
+                            bottom: 14,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  memory.title,
+                                  maxLines: 3,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 16,
+                                  ),
+                                ),
+                                const SizedBox(height: 5),
+                                Text(
+                                  '${memory.fileIds.length} moments',
+                                  style: const TextStyle(
+                                    color: Colors.white70,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          IgnorePointer(
+                            child: DecoratedBox(
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(22),
+                                border: Border.all(
+                                  width: watched ? 1 : 2,
+                                  color: watched
+                                      ? Colors.white24
+                                      : memoryColor(memory),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ],
     );
   }
 }
 
-class _CoverCircle extends ConsumerStatefulWidget {
-  const _CoverCircle({super.key, required this.memory});
-
+class _Cover extends ConsumerWidget {
+  const _Cover({required this.memory});
   final MemoryCluster memory;
-
   @override
-  ConsumerState<_CoverCircle> createState() => _CoverCircleState();
-}
-
-class _CoverCircleState extends ConsumerState<_CoverCircle> {
-  EnteFile? _coverFile;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadCover();
-  }
-
-  Future<void> _loadCover() async {
-    final files = await ref.read(
-      memoryFilesProvider(widget.memory.id).future,
+  Widget build(BuildContext context, WidgetRef ref) {
+    final files = ref.watch(memoryFilesProvider(memory.id)).value;
+    if (files == null || files.isEmpty) {
+      return Center(
+        child: Icon(memoryIcon(memory), size: 44, color: memoryColor(memory)),
+      );
+    }
+    final cover = files.firstWhere(
+      (f) => f.id == memory.coverFileId,
+      orElse: () => files.first,
     );
-    if (!mounted || files.isEmpty) return;
-    final coverId = widget.memory.coverFileId;
-    final cover = coverId != null
-        ? files.firstWhere((f) => f.id == coverId, orElse: () => files.first)
-        : files.first;
-    setState(() => _coverFile = cover);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: 64,
-      height: 64,
-      decoration: const BoxDecoration(
-        shape: BoxShape.circle,
-        gradient: LinearGradient(
-          colors: [
-            Color(0xFF00C853), // bright green
-            Color(0xFF1DB954), // Ente/app green
-            Color(0xFF00897B), // teal
-          ],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-      ),
-      padding: const EdgeInsets.all(2.5),
-      child: ClipOval(
-        child: _coverFile != null
-            // 64 px circle → decode small so the stories rail stays light.
-            ? ThumbnailImage(file: _coverFile!, fit: BoxFit.cover, decodeWidth: 160)
-            : const ColoredBox(color: Colors.black26),
-      ),
+    return ThumbnailImage(
+      key: ValueKey(cover.id),
+      file: cover,
+      decodeWidth: 360,
     );
   }
 }

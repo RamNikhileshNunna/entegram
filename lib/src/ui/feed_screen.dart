@@ -1,62 +1,33 @@
-import 'dart:math';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../db/models/memory_cluster.dart';
+import '../memories/memory_catalog.dart';
 import '../providers.dart';
 import 'widgets/memory_card.dart';
 import 'widgets/stories_bar.dart';
 
 class FeedScreen extends ConsumerStatefulWidget {
   const FeedScreen({super.key});
-
   @override
   ConsumerState<FeedScreen> createState() => _FeedScreenState();
 }
 
 class _FeedScreenState extends ConsumerState<FeedScreen> {
-  static const double _prefetchExtent = 1200;
-
   final _scroll = ScrollController();
-
-  /// Full pool from the DB — updated whenever memoriesProvider fires.
-  List<MemoryCluster> _pool = [];
-
-  /// Signatures currently represented in [_pool], to detect when the *set* of
-  /// memories (not just their Isar IDs) actually changed.
-  Set<String> _poolSigs = {};
-
-  /// Growing display list (interleaved copies of the pool, appended on demand).
-  final List<MemoryCluster> _display = [];
-
-  /// Length of one interleaved copy of the pool, used to preserve the number of
-  /// recycled copies (and thus scroll position) across pool updates.
-  int _baseLen = 0;
-
-  /// Fresh each app launch → the feed is shuffled differently every cold start.
-  /// Stable within a session, so background-sync rebuilds don't reshuffle.
-  final int _seed = Random().nextInt(1 << 30);
-
-  /// True while a server fetch or recycle append is in flight.
   bool _fetching = false;
-
-  /// False once the server confirms there are no more file pages to load.
-  bool _serverHasMore = true;
-
-  /// Prevents the scroll listener from firing another recycle immediately
-  /// after an append (the layout metric change re-fires the listener before
-  /// the user has actually scrolled further).
-  bool _justAppended = false;
-
-  /// Hard cap on accumulated feed items for memory safety. The feed recycles
-  /// shuffled batches up to this — effectively infinite for any real session.
-  static const int _maxDisplay = 5000;
-
-  /// Scrollable height seen during the current eager-fill pass. Guards against
-  /// a pathological pool (e.g. everything collapsed to zero height) appending
-  /// forever: if a fill doesn't grow the scroll area, we stop.
-  double _lastFillExtent = -1;
+  bool _signingOut = false;
+  bool _hasMore = true;
+  String? _pageError;
+  String _filter = 'For you';
+  int _fillAttempts = 0;
+  static const _filters = [
+    'For you',
+    'On this day',
+    'People',
+    'Places',
+    'Yearbooks',
+  ];
 
   @override
   void initState() {
@@ -66,390 +37,332 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
 
   @override
   void dispose() {
-    _scroll
-      ..removeListener(_onScroll)
-      ..dispose();
+    _scroll.dispose();
     super.dispose();
   }
 
-  // Called whenever memoriesProvider emits a new list.
-  void _onPoolUpdate(List<MemoryCluster> memories) {
-    final sigs = memories.map((m) => m.signature).toSet();
-    final sameSet =
-        sigs.length == _poolSigs.length && sigs.containsAll(_poolSigs);
-    _pool = memories;
-
-    if (memories.isEmpty) {
-      setState(() => _display.clear());
-      return;
-    }
-
-    if (sameSet && _display.isNotEmpty) {
-      // The mapper rebuilt (new Isar IDs) but the *set* of memories is
-      // unchanged. Swap each displayed card to its new cluster object in place
-      // so IDs stay valid — no reorder, no scroll jump, no flicker.
-      final bySig = {for (final m in memories) m.signature: m};
-      for (var i = 0; i < _display.length; i++) {
-        final updated = bySig[_display[i].signature];
-        if (updated != null) _display[i] = updated;
-      }
-      setState(() {});
-      return;
-    }
-
-    // The set of memories changed (e.g. background sync discovered older photos
-    // and generated "Summer 2022" / "2 years ago this month"). Re-interleave
-    // the whole pool so the new memories actually appear, preserving how many
-    // recycled copies were on screen so scroll position is roughly kept.
-    _poolSigs = sigs;
-    final base = _interleave(memories);
-    final copies = _baseLen > 0
-        ? (_display.length / _baseLen).round().clamp(1, 50)
-        : 1;
-    _baseLen = base.length;
-    setState(() {
-      _display.clear();
-      for (var i = 0; i < copies; i++) {
-        _display.addAll(base);
-      }
-    });
-    _lastFillExtent = -1;
-    _ensureViewportFilled();
-  }
-
-  /// One interleaved copy of the pool: each kind shuffled, then round-robined
-  /// across kinds so people, on-this-day and trip/season/year cards alternate
-  /// instead of one type flooding.
-  ///
-  /// Ordering is a *stable hash* of (signature, [_seed]) rather than a plain
-  /// shuffle: random per launch (since [_seed] changes), yet a given memory
-  /// keeps its position when others are added mid-session — so background sync
-  /// slots new memories in without reshuffling what's on screen.
-  List<MemoryCluster> _interleave(List<MemoryCluster> pool) {
-    final byKind = <MemoryKind, List<MemoryCluster>>{};
-    for (final m in pool) {
-      byKind.putIfAbsent(m.kind, () => []).add(m);
-    }
-    for (final list in byKind.values) {
-      list.sort((a, b) =>
-          Object.hash(a.signature, _seed).compareTo(Object.hash(b.signature, _seed)));
-    }
-    final kinds = byKind.keys.toList()
-      ..sort((a, b) => Object.hash(a, _seed).compareTo(Object.hash(b, _seed)));
-    final iters = [for (final k in kinds) byKind[k]!.iterator];
-    final out = <MemoryCluster>[];
-    var any = true;
-    while (any) {
-      any = false;
-      for (final it in iters) {
-        if (it.moveNext()) {
-          out.add(it.current);
-          any = true;
-        }
-      }
-    }
-    return out;
-  }
-
-  /// Keeps the feed scrollable. Growth comes from recycling the *current* pool
-  /// (instant, always works) — never gated on the server — so the feed is never
-  /// stuck "loading" with no new cards. Server paging happens separately, in
-  /// the background, to discover more memories.
-  void _ensureViewportFilled() {
-    if (_pool.isEmpty) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_scroll.hasClients) return;
-      final pos = _scroll.position;
-      if (pos.maxScrollExtent >= pos.viewportDimension * 1.5) return;
-      if (_display.length >= _maxDisplay) return;
-      // Runaway guard: stop if the previous fill didn't grow the scroll area.
-      if (pos.maxScrollExtent <= _lastFillExtent) return;
-      _lastFillExtent = pos.maxScrollExtent;
-      _appendBatch();
-      _fetchServerMore();
-      _ensureViewportFilled(); // chain until comfortably filled
-    });
-  }
-
-  // Append one more interleaved copy of the pool to _display (recycle for the
-  // never-ending feed).
-  void _appendBatch() {
-    if (_pool.isEmpty) return;
-    final base = _interleave(_pool);
-    _baseLen = base.length;
-    setState(() => _display.addAll(base));
-    _justAppended = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) => _justAppended = false);
-  }
-
   void _onScroll() {
-    if (!_scroll.hasClients || _justAppended) return;
-    final remaining =
-        _scroll.position.maxScrollExtent - _scroll.position.pixels;
-    if (remaining <= _prefetchExtent) {
-      if (_display.length < _maxDisplay) _appendBatch(); // grow now (recycle)
-      _fetchServerMore(); // discover more in the background
+    if (_scroll.hasClients && _scroll.position.extentAfter < 900) _loadMore();
+  }
+
+  Future<void> _loadMore() async {
+    if (_fetching || !_hasMore || _pageError != null) return;
+    setState(() => _fetching = true);
+    try {
+      final more = await ref.read(loadMoreProvider)();
+      if (mounted) setState(() => _hasMore = more);
+    } catch (_) {
+      if (mounted) setState(() => _pageError = 'Could not load more memories');
+    } finally {
+      if (mounted) setState(() => _fetching = false);
     }
   }
 
-  /// Pages the server for more files in the background to discover new
-  /// memories. Independent of feed growth — the feed never waits on this.
-  Future<void> _fetchServerMore() async {
-    if (_fetching || !_serverHasMore) return;
-    _fetching = true;
+  Future<void> _refresh() async {
+    setState(() {
+      _hasMore = true;
+      _pageError = null;
+      _fillAttempts = 0;
+    });
     try {
-      final hasMore = await ref.read(loadMoreProvider)();
-      if (mounted) setState(() => _serverHasMore = hasMore);
-    } finally {
-      _fetching = false;
+      ref.invalidate(bootstrapProvider);
+      await ref.read(bootstrapProvider.future);
+      if (mounted) ref.read(memoryFeedProvider.notifier).reorder();
+    } catch (_) {
+      /* bootstrap's AsyncError is shown inline; retain cached cards. */
     }
   }
+
+  bool _matches(MemoryCluster m) => switch (_filter) {
+    'On this day' =>
+      m.category == MemoryCategory.onThisDay ||
+          m.category == MemoryCategory.flashback,
+    'People' => m.category == MemoryCategory.people,
+    'Places' => m.category == MemoryCategory.trip,
+    'Yearbooks' =>
+      m.category == MemoryCategory.year || m.category == MemoryCategory.season,
+    _ => true,
+  };
 
   @override
   Widget build(BuildContext context) {
-    final memoriesAsync = ref.watch(memoriesProvider);
+    final source = ref.watch(memoriesProvider);
+    final memories = ref.watch(memoryFeedProvider).where(_matches).toList();
     final bootstrap = ref.watch(bootstrapProvider);
-
-    // Keep _pool in sync with the DB stream; seed _display on first data.
-    ref.listen<AsyncValue<List<MemoryCluster>>>(memoriesProvider, (_, next) {
-      next.whenData(_onPoolUpdate);
-    });
-
+    final width = MediaQuery.sizeOf(context).width;
+    final padding = width < 600 ? 12.0 : 28.0;
+    final inset = (width - 1120).clamp(0, double.infinity) / 2 + padding;
+    final columns = width - inset * 2 >= 780 ? 2 : 1;
+    // A few pages can fill a sparse first viewport; never busy-loop on a
+    // library that has no suitable memories. Manual load/retry stays available.
+    if (memories.isNotEmpty &&
+        _fillAttempts < 3 &&
+        _hasMore &&
+        !_fetching &&
+        _pageError == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted ||
+            !_scroll.hasClients ||
+            _scroll.position.maxScrollExtent > 500) {
+          return;
+        }
+        _fillAttempts++;
+        _loadMore();
+      });
+    }
     return Scaffold(
-      body: RefreshIndicator(
-        color: const Color.fromRGBO(29, 185, 84, 1),
-        onRefresh: () => ref.refresh(bootstrapProvider.future),
-        child: CustomScrollView(
-          controller: _scroll,
-          slivers: [
-            SliverAppBar(
-              floating: true,
-              snap: true,
-              title: GestureDetector(
-                onTap: () {
-                  if (_scroll.hasClients) {
-                    _scroll.animateTo(
-                      0,
-                      duration: const Duration(milliseconds: 400),
-                      curve: Curves.easeOutCubic,
-                    );
-                  }
-                },
-                behavior: HitTestBehavior.opaque,
-                child: Row(
+      body: SafeArea(
+        bottom: false,
+        child: RefreshIndicator(
+          onRefresh: _refresh,
+          child: CustomScrollView(
+            controller: _scroll,
+            physics: const AlwaysScrollableScrollPhysics(),
+
+            slivers: [
+              SliverAppBar(
+                pinned: true,
+                title: const Row(
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    Container(
-                      width: 28,
-                      height: 28,
-                      decoration: BoxDecoration(
-                        color: const Color.fromRGBO(29, 185, 84, 0.15),
-                        shape: BoxShape.circle,
-                        border: Border.all(
-                          color: const Color.fromRGBO(29, 185, 84, 0.5),
-                        ),
-                      ),
-                      child: const Icon(
-                        Icons.photo_library_outlined,
-                        size: 16,
-                        color: Color.fromRGBO(29, 185, 84, 1),
-                      ),
+                    Icon(
+                      Icons.filter_vintage_outlined,
+                      color: Color(0xFFA5D9BC),
                     ),
-                    const SizedBox(width: 8),
-                    const Text(
-                      'Entegram',
-                      style: TextStyle(
-                        fontWeight: FontWeight.w700,
-                        fontSize: 18,
-                        letterSpacing: -0.3,
+                    SizedBox(width: 10),
+                    Flexible(
+                      child: Text(
+                        'Entegram',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                       ),
                     ),
                   ],
                 ),
+                actions: [
+                  IconButton(
+                    tooltip: 'Refresh memories',
+                    onPressed: bootstrap.isLoading ? null : _refresh,
+                    icon: const Icon(Icons.sync_rounded),
+                  ),
+                  IconButton(
+                    tooltip: 'Sign out',
+                    onPressed: _signingOut ? null : _signOut,
+                    icon: const Icon(Icons.logout_rounded),
+                  ),
+                  const SizedBox(width: 8),
+                ],
               ),
-              actions: [
-                IconButton(
-                  tooltip: 'Sign out',
-                  onPressed: () async {
-                    final ok = await showDialog<bool>(
-                      context: context,
-                      builder: (ctx) => AlertDialog(
-                        title: const Text('Sign out?'),
-                        actions: [
-                          TextButton(
-                            onPressed: () => Navigator.pop(ctx, false),
-                            child: const Text('Cancel'),
-                          ),
-                          TextButton(
-                            onPressed: () => Navigator.pop(ctx, true),
-                            child: const Text('Sign out'),
-                          ),
+              SliverPadding(
+                padding: EdgeInsets.fromLTRB(inset + 4, 24, inset + 4, 20),
+                sliver: SliverToBoxAdapter(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'A little closer to yesterday.',
+                        style: Theme.of(context).textTheme.headlineMedium
+                            ?.copyWith(
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: -0.8,
+                            ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'The people, places and moments worth another look.',
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              SliverPadding(
+                padding: EdgeInsets.symmetric(horizontal: inset),
+                sliver: const SliverToBoxAdapter(child: StoriesBar()),
+              ),
+              SliverPadding(
+                padding: EdgeInsets.fromLTRB(inset + 4, 24, inset + 4, 12),
+                sliver: SliverToBoxAdapter(
+                  child: Text(
+                    'Your memories',
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                ),
+              ),
+              SliverToBoxAdapter(
+                child: SizedBox(
+                  height: 54,
+                  child: ListView.separated(
+                    padding: EdgeInsets.symmetric(horizontal: inset + 4),
+                    scrollDirection: Axis.horizontal,
+                    itemCount: _filters.length,
+                    separatorBuilder: (_, _) => const SizedBox(width: 8),
+                    itemBuilder: (_, i) => ChoiceChip(
+                      label: Text(_filters[i]),
+                      selected: _filter == _filters[i],
+                      onSelected: (_) => setState(() {
+                        _filter = _filters[i];
+                        _fillAttempts = 0;
+                      }),
+                    ),
+                  ),
+                ),
+              ),
+              if (bootstrap.hasError && memories.isNotEmpty)
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: EdgeInsets.symmetric(horizontal: inset),
+                    child: _Message(
+                      'You’re viewing saved memories. Sync is unavailable.',
+                      action: _refresh,
+                      actionLabel: 'Retry sync',
+                    ),
+                  ),
+                ),
+              if (memories.isEmpty)
+                SliverFillRemaining(
+                  hasScrollBody: false,
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Center(
+                      child: source.isLoading || bootstrap.isLoading
+                          ? const Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                CircularProgressIndicator(),
+                                SizedBox(height: 16),
+                                Text('Finding your memories…'),
+                              ],
+                            )
+                          : _Message(
+                              source.hasError || bootstrap.hasError
+                                  ? 'Your library could not be synced.'
+                                  : _filter == 'For you'
+                                  ? 'Your memories start here. Sync your library to rediscover your photos.'
+                                  : 'No memories in this collection yet.',
+                              action: _refresh,
+                              actionLabel: 'Sync library',
+                            ),
+                    ),
+                  ),
+                )
+              else ...[
+                SliverPadding(
+                  padding: EdgeInsets.fromLTRB(inset, 8, inset, 0),
+                  sliver: SliverList.builder(
+                    itemCount: (memories.length / columns).ceil(),
+                    itemBuilder: (_, row) => Padding(
+                      padding: const EdgeInsets.only(bottom: 20),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          for (var col = 0; col < columns; col++) ...[
+                            if (col > 0) const SizedBox(width: 20),
+                            Expanded(
+                              child: row * columns + col < memories.length
+                                  ? MemoryCard(
+                                      key: ValueKey(
+                                        memories[row * columns + col].signature,
+                                      ),
+                                      memory: memories[row * columns + col],
+                                    )
+                                  : const SizedBox.shrink(),
+                            ),
+                          ],
                         ],
                       ),
-                    );
-                    if (ok == true && context.mounted) {
-                      ref.read(sessionProvider.notifier).logout();
-                    }
-                  },
-                  icon: const Icon(Icons.logout),
+                    ),
+                  ),
+                ),
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: EdgeInsets.fromLTRB(inset, 8, inset, 40),
+                    child: _fetching
+                        ? const Center(child: CircularProgressIndicator())
+                        : _pageError != null
+                        ? _Message(
+                            _pageError!,
+                            actionLabel: 'Try again',
+                            action: () {
+                              setState(() => _pageError = null);
+                              return _loadMore();
+                            },
+                          )
+                        : _hasMore
+                        ? Center(
+                            child: TextButton.icon(
+                              onPressed: _loadMore,
+                              icon: const Icon(Icons.add),
+                              label: const Text('Discover more memories'),
+                            ),
+                          )
+                        : const _Message(
+                            'You’re all caught up. There’s more to remember tomorrow.',
+                          ),
+                  ),
                 ),
               ],
-            ),
-            const SliverToBoxAdapter(child: StoriesBar()),
-            const SliverToBoxAdapter(child: Divider(height: 1)),
-            ..._buildBody(memoriesAsync, bootstrap),
-          ],
-        ),
-      ),
-    );
-  }
-
-  List<Widget> _buildBody(
-    AsyncValue<List<MemoryCluster>> memoriesAsync,
-    AsyncValue<void> bootstrap,
-  ) {
-    // While the provider is loading and we have nothing to show yet, spinner.
-    if (memoriesAsync.isLoading && _display.isEmpty) {
-      return [const _FullSpinner()];
-    }
-    if (memoriesAsync.hasError && _display.isEmpty) {
-      return [_FullMessage('Error: ${memoriesAsync.error}')];
-    }
-
-    if (_display.isEmpty) {
-      return [
-        bootstrap.isLoading
-            ? const _FullSpinner(label: 'Syncing your memories…')
-            : bootstrap.hasError
-            ? _FullMessage('Sync failed: ${bootstrap.error}')
-            : const _EmptyState(),
-      ];
-    }
-
-    return [
-      SliverList.separated(
-        itemCount: _display.length,
-        separatorBuilder: (_, _) => const Divider(height: 1),
-        itemBuilder: (_, i) => MemoryCard(memory: _display[i]),
-      ),
-      // Show spinner only while the server still has pages to load.
-      // Once exhausted the feed recycles silently — no spinner needed.
-      if (_serverHasMore)
-        const SliverToBoxAdapter(child: _BottomSpinner()),
-    ];
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Shared helper widgets
-// ---------------------------------------------------------------------------
-
-class _FullSpinner extends StatelessWidget {
-  const _FullSpinner({this.label});
-  final String? label;
-
-  @override
-  Widget build(BuildContext context) {
-    return SliverFillRemaining(
-      hasScrollBody: false,
-      child: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const CircularProgressIndicator(
-              color: Color.fromRGBO(29, 185, 84, 1),
-            ),
-            if (label != null) ...[
-              const SizedBox(height: 16),
-              Text(label!, style: Theme.of(context).textTheme.bodySmall),
             ],
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _FullMessage extends StatelessWidget {
-  const _FullMessage(this.message);
-  final String message;
-
-  @override
-  Widget build(BuildContext context) {
-    return SliverFillRemaining(
-      hasScrollBody: false,
-      child: Center(
-        child: Text(
-          message,
-          textAlign: TextAlign.center,
-          style: Theme.of(context).textTheme.bodySmall,
-        ),
-      ),
-    );
-  }
-}
-
-class _EmptyState extends StatelessWidget {
-  const _EmptyState();
-
-  @override
-  Widget build(BuildContext context) {
-    return SliverFillRemaining(
-      hasScrollBody: false,
-      child: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 80,
-              height: 80,
-              decoration: BoxDecoration(
-                color: const Color.fromRGBO(29, 185, 84, 0.1),
-                shape: BoxShape.circle,
-              ),
-              child: const Icon(
-                Icons.photo_library_outlined,
-                size: 40,
-                color: Color.fromRGBO(29, 185, 84, 0.6),
-              ),
-            ),
-            const SizedBox(height: 20),
-            const Text(
-              'No memories yet',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 17,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            const SizedBox(height: 8),
-            const Text(
-              'Pull down to sync your Ente library',
-              style: TextStyle(color: Colors.white60, fontSize: 14),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _BottomSpinner extends StatelessWidget {
-  const _BottomSpinner();
-
-  @override
-  Widget build(BuildContext context) {
-    return const Padding(
-      padding: EdgeInsets.symmetric(vertical: 28),
-      child: Center(
-        child: SizedBox(
-          height: 22,
-          width: 22,
-          child: CircularProgressIndicator(
-            strokeWidth: 2,
-            color: Color.fromRGBO(29, 185, 84, 1),
           ),
         ),
       ),
     );
   }
+
+  Future<void> _signOut() async {
+    if (_signingOut) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Sign out?'),
+        content: const Text('Your locally synced library will be removed.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Sign out'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true && mounted) {
+      setState(() => _signingOut = true);
+      try {
+        await ref.read(sessionProvider.notifier).logout();
+      } catch (_) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Local cleanup could not be completed.'),
+            ),
+          );
+        }
+      } finally {
+        if (mounted) setState(() => _signingOut = false);
+      }
+    }
+  }
+}
+
+class _Message extends StatelessWidget {
+  const _Message(this.text, {this.action, this.actionLabel});
+  final String text;
+  final Future<void> Function()? action;
+  final String? actionLabel;
+  @override
+  Widget build(BuildContext context) => Column(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Text(
+        text,
+        textAlign: TextAlign.center,
+        style: Theme.of(context).textTheme.bodyMedium,
+      ),
+      if (action != null)
+        TextButton(onPressed: action, child: Text(actionLabel!)),
+    ],
+  );
 }

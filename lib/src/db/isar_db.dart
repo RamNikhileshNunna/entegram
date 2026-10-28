@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:isar_community/isar.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -23,25 +21,14 @@ class IsarDb {
     MemoryClusterSchema,
   ];
 
-  /// Opens the app-facing database in the platform documents directory.
-  /// If the schema has changed and Isar cannot migrate, the database is
-  /// deleted and recreated so the app can always open (data re-syncs from
-  /// the server on next bootstrap).
+  /// Opens the local library. Isar handles compatible migrations. An I/O or
+  /// schema error must surface instead of silently deleting a user's database
+  /// while leaving persisted sync cursors pointing beyond the lost history.
   static Future<IsarDb> open({String? directoryOverride}) async {
     final dir =
         directoryOverride ?? (await getApplicationDocumentsDirectory()).path;
-    try {
-      final isar = await Isar.open(schemas, directory: dir, name: 'entegram');
-      return IsarDb._(isar);
-    } catch (_) {
-      // Schema migration failed — wipe and reopen.
-      final dbFile = '$dir/entegram.isar';
-      final lockFile = '$dir/entegram.isar.lock';
-      try { await File(dbFile).delete(); } catch (_) {}
-      try { await File(lockFile).delete(); } catch (_) {}
-      final isar = await Isar.open(schemas, directory: dir, name: 'entegram');
-      return IsarDb._(isar);
-    }
+    final isar = await Isar.open(schemas, directory: dir, name: 'entegram');
+    return IsarDb._(isar);
   }
 
   /// Opens an Isar instance pointed at an already-open database from a
