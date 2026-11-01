@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Run the opt-in Flutter account check without retaining private test output."""
+import argparse
 import getpass
 import json
 import os
@@ -13,6 +14,9 @@ import time
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--ml-sample', action='store_true', help='Check Ente ML against a limited metadata sample instead of syncing the entire archive')
+    arguments = parser.parse_args()
     if not sys.stdin.isatty():
         sys.exit('Run in a terminal so the password can be entered without echo.')
     endpoint = input('Ente endpoint (including http:// or https://): ').strip()
@@ -31,6 +35,8 @@ def main():
         environment.update(ENTE_TEST_EMAIL=email, ENTE_TEST_PASSWORD=password,
                            ENTE_TEST_URL=endpoint, ENTE_TEST_STORAGE=str(folder / 'data'),
                            ENTE_TEST_REPORT=str(report))
+        if arguments.ml_sample:
+            environment['ENTE_TEST_ML_SAMPLE'] = '1'
         process = subprocess.Popen(
             ['flutter', 'test', '--no-pub', '--reporter', 'expanded',
              'test/selfhost_live_check.dart'],
@@ -85,7 +91,7 @@ def main():
                 os.killpg(process.pid, signal.SIGKILL)
                 process.wait()
         success = (process.returncode == 0 and
-                   'LIVE_VERIFICATION_COMPLETE' in checks and
+                   ('LIVE_ML_SAMPLE_COMPLETE' if arguments.ml_sample else 'LIVE_VERIFICATION_COMPLETE') in checks and
                    'LOCAL_CLIENTS_DISPOSED' in checks and
                    not any(check.startswith('FAILED') for check in checks))
     print('Private temporary test storage removed.')

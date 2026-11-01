@@ -7,6 +7,7 @@ import '../../memories/memory_catalog.dart';
 import '../../providers.dart';
 import 'fullscreen_viewer.dart';
 import 'memory_style.dart';
+import 'memory_collage.dart';
 import 'story_viewer.dart';
 import 'thumbnail_image.dart';
 
@@ -100,55 +101,66 @@ class _MemoryCardState extends ConsumerState<MemoryCard> {
                     label: const Text('Reload photos'),
                   ),
                 ),
-                data: (files) => Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    PageView.builder(
-                      key: PageStorageKey('photos:${memory.signature}'),
-                      controller: _page,
-                      itemCount: files.length,
-                      onPageChanged: (value) {
-                        setState(() => _index = value);
-                        ref
-                            .read(thumbnailServiceProvider)
-                            ?.prefetch(files.skip(value + 1).take(2));
-                      },
-                      itemBuilder: (_, i) => Semantics(
-                        label:
-                            '${files[i].fileType == 1 ? 'Video' : 'Photo'} ${i + 1} of ${files.length}',
-                        button: true,
-                        child: GestureDetector(
-                          onTap: () => openFullscreenViewer(
-                            context,
-                            files: files,
-                            initialIndex: i,
-                            memory: memory,
-                          ),
-                          child: ThumbnailImage(
-                            key: ValueKey(files[i].id),
-                            file: files[i],
-                          ),
+                data: (files) => memory.category == MemoryCategory.scene
+                    ? MemoryCollage(
+                        files: files,
+                        coverFileId: memory.coverFileId,
+                        onOpen: (index) => openFullscreenViewer(
+                          context,
+                          files: files,
+                          initialIndex: index,
+                          memory: memory,
                         ),
-                      ),
-                    ),
-                    if (files.length > 1)
-                      Positioned(
-                        top: 12,
-                        right: 12,
-                        child: _Pill('${index + 1} / ${files.length}'),
-                      ),
-                    if (files.isNotEmpty && files[index].fileType == 1)
-                      const IgnorePointer(
-                        child: Center(
-                          child: Icon(
-                            Icons.play_circle_outline,
-                            size: 54,
-                            color: Colors.white,
+                      )
+                    : Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          PageView.builder(
+                            key: PageStorageKey('photos:${memory.signature}'),
+                            controller: _page,
+                            itemCount: files.length,
+                            onPageChanged: (value) {
+                              setState(() => _index = value);
+                              ref
+                                  .read(thumbnailServiceProvider)
+                                  ?.prefetch(files.skip(value + 1).take(2));
+                            },
+                            itemBuilder: (_, i) => Semantics(
+                              label:
+                                  '${files[i].fileType == 1 ? 'Video' : 'Photo'} ${i + 1} of ${files.length}',
+                              button: true,
+                              child: GestureDetector(
+                                onTap: () => openFullscreenViewer(
+                                  context,
+                                  files: files,
+                                  initialIndex: i,
+                                  memory: memory,
+                                ),
+                                child: ThumbnailImage(
+                                  key: ValueKey(files[i].id),
+                                  file: files[i],
+                                ),
+                              ),
+                            ),
                           ),
-                        ),
+                          if (files.length > 1)
+                            Positioned(
+                              top: 12,
+                              right: 12,
+                              child: _Pill('${index + 1} / ${files.length}'),
+                            ),
+                          if (files.isNotEmpty && files[index].fileType == 1)
+                            const IgnorePointer(
+                              child: Center(
+                                child: Icon(
+                                  Icons.play_circle_outline,
+                                  size: 54,
+                                  color: Colors.white,
+                                ),
+                              ),
+                            ),
+                        ],
                       ),
-                  ],
-                ),
               ),
             ),
             Padding(

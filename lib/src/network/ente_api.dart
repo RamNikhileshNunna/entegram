@@ -251,7 +251,10 @@ class EnteApi {
       // The worker attempt gets a short timeout so a slow/stalled CDN edge
       // fails over to the direct endpoint quickly instead of blocking the
       // caller (and, for thumbnails, a download-concurrency slot).
-      final bytes = await fetch(workerUrl, workerReceiveTimeout ?? receiveTimeout);
+      final bytes = await fetch(
+        workerUrl,
+        workerReceiveTimeout ?? receiveTimeout,
+      );
       _workerFailures.remove(host); // healthy again — reset the streak
       return bytes;
     } on DioException catch (e) {
@@ -290,10 +293,7 @@ class EnteApi {
   /// On production this uses the `thumbnails.ente.com` CDN worker (edge-cached,
   /// fast) and falls back to `$endpoint/files/preview/{id}`. On a self-hosted
   /// endpoint it fetches `$endpoint/files/preview/{id}` directly.
-  Future<Uint8List> downloadThumbnail(
-    int fileID, {
-    CancelToken? cancelToken,
-  }) {
+  Future<Uint8List> downloadThumbnail(int fileID, {CancelToken? cancelToken}) {
     return _downloadBytes(
       workerUrl: _useWorker ? '$_thumbnailWorker/?fileID=$fileID' : null,
       directUrl: '/files/preview/$fileID',
@@ -330,6 +330,52 @@ class EnteApi {
     );
     return ((res.data!['diff'] as List?) ?? const [])
         .cast<Map<String, dynamic>>();
+  }
+
+  /// Ente's read-only ML status and file-data fetch operations use POST.
+  Future<List<Map<String, dynamic>>> mlStatusDiff({
+    required int sinceTime,
+    CancelToken? cancelToken,
+  }) async {
+    final response = await _dio.post<Map<String, dynamic>>(
+      '/files/data/status-diff',
+      data: {'lastUpdatedAt': sinceTime},
+      options: _authed,
+      cancelToken: cancelToken,
+    );
+    return ((response.data?['diff'] as List?) ?? [])
+        .cast<Map<String, dynamic>>();
+  }
+
+  Future<Map<String, dynamic>> fetchMlData(
+    List<int> ids, {
+    CancelToken? cancelToken,
+  }) async {
+    if (ids.isEmpty || ids.length > 64) {
+      throw ArgumentError('ML batch must contain 1–64 files');
+    }
+    final bounded = CancelToken();
+    var finished = false;
+    cancelToken?.whenCancel.then((reason) {
+      if (!finished) bounded.cancel(reason);
+    });
+    late final Response<Map<String, dynamic>> response;
+    try {
+      response = await _dio.post<Map<String, dynamic>>(
+        '/files/data/fetch',
+        data: {'fileIDs': ids, 'type': 'mldata'},
+        options: _authed,
+        cancelToken: bounded,
+        onReceiveProgress: (received, total) {
+          if (received > 32 * 1024 * 1024 || total > 32 * 1024 * 1024) {
+            bounded.cancel('ML response exceeded size limit');
+          }
+        },
+      );
+    } finally {
+      finished = true;
+    }
+    return response.data!;
   }
 }
 

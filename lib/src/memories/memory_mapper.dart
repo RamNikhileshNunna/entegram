@@ -3,6 +3,8 @@ import 'package:isar_community/isar.dart';
 
 import '../db/isar_db.dart';
 import '../db/models/ente_file.dart';
+import '../db/models/file_ml.dart';
+import '../ml/semantic_catalog.dart';
 import '../db/models/memory_cluster.dart';
 import '../db/models/person.dart';
 import 'memory_engine.dart';
@@ -54,10 +56,19 @@ class MemoryMapper {
         .filter()
         .isDeletedEqualTo(false)
         .findAll();
+    final classified = await isar.fileMls
+        .filter()
+        .hasFileEqualTo(true)
+        .promptRevisionEqualTo(semanticPromptRevision)
+        .findAll();
+    final sceneScores = {
+      for (final entry in classified)
+        if (entry.scores.isNotEmpty) entry.id: entry.scores,
+    };
     final now = _clock();
     final memories = await compute(
       _generateMemories,
-      _MemoryInput(files, people, now),
+      _MemoryInput(files, people, now, sceneScores),
     );
     final previous = await isar.memoryClusters.where().findAll();
     final bySignature = {for (final m in previous) m.signature: m};
@@ -89,11 +100,13 @@ class MemoryMapper {
 }
 
 class _MemoryInput {
-  const _MemoryInput(this.files, this.people, this.now);
+  const _MemoryInput(this.files, this.people, this.now, this.sceneScores);
+  final Map<int, List<double>> sceneScores;
   final List<EnteFile> files;
   final List<Person> people;
   final DateTime now;
 }
 
-List<MemoryCluster> _generateMemories(_MemoryInput input) =>
-    MemoryEngine(now: input.now).build(input.files, input.people);
+List<MemoryCluster> _generateMemories(_MemoryInput input) => MemoryEngine(
+  now: input.now,
+).build(input.files, input.people, sceneScores: input.sceneScores);

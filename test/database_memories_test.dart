@@ -5,6 +5,12 @@ import 'dart:convert';
 import 'package:entegram/src/db/isar_db.dart';
 import 'package:entegram/src/db/models/ente_collection.dart';
 import 'package:entegram/src/db/models/ente_file.dart';
+import 'package:entegram/src/db/models/file_ml.dart';
+import 'package:entegram/src/ml/semantic_sync.dart';
+import 'package:entegram/src/ml/semantic_prompts.dart';
+import 'package:entegram/src/ml/semantic_catalog.dart';
+import 'package:entegram/src/ml/ml_decoder.dart';
+import 'package:dio/dio.dart';
 import 'package:entegram/src/db/models/memory_cluster.dart';
 import 'package:entegram/src/memories/memory_mapper.dart';
 import 'package:entegram/src/network/ente_api.dart';
@@ -119,6 +125,77 @@ class _Crypto implements CryptoIsolate {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
+class _MlApi extends EnteApi {
+  final statuses = <Map<String, dynamic>>[];
+  final fetched = <List<int>>[];
+  final cursors = <int>[];
+  final indexing = <int>{};
+  final errors = <int>{};
+  final missing = <int>{};
+  bool unavailable = false;
+  bool stalled = false;
+  @override
+  Future<List<Map<String, dynamic>>> mlStatusDiff({
+    required int sinceTime,
+    CancelToken? cancelToken,
+  }) async {
+    cursors.add(sinceTime);
+    if (unavailable) {
+      throw DioException(
+        requestOptions: RequestOptions(path: '/files/data/status-diff'),
+        response: Response(requestOptions: RequestOptions(), statusCode: 404),
+        type: DioExceptionType.badResponse,
+      );
+    }
+    if (stalled) {
+      return [
+        {'fileID': 1, 'type': 'mldata', 'updatedAt': sinceTime},
+      ];
+    }
+    return statuses
+        .where((s) => (s['updatedAt'] as int) > sinceTime)
+        .take(1)
+        .toList();
+  }
+
+  @override
+  Future<Map<String, dynamic>> fetchMlData(
+    List<int> ids, {
+    CancelToken? cancelToken,
+  }) async {
+    fetched.add(ids);
+    return {
+      'data': [
+        for (final id in ids)
+          if (!indexing.contains(id) &&
+              !errors.contains(id) &&
+              !missing.contains(id))
+            {'fileID': id},
+      ],
+      'pendingIndexFileIDs': indexing.toList(),
+      'errFileIDs': errors.toList(),
+    };
+  }
+}
+
+class _MlCrypto extends _Crypto {
+  @override
+  Future<List<MlClassification>> classifyMlData(
+    List<EnteFile> files,
+    List<Map<String, dynamic>> entries,
+    List<List<double>> queries,
+  ) async => [
+    for (final entry in entries)
+      MlClassification(
+        entry['fileID'] as int,
+        scores: List.generate(
+          semanticThemes.length + 1,
+          (i) => i == 0 ? .4 : .1,
+        ),
+      ),
+  ];
+}
+
 class _Controller implements SyncController {
   final stopped = Completer<void>();
   bool disposed = false;
@@ -220,6 +297,14 @@ void main() {
         await preferences.setString(key, 'AQID');
       }
       await preferences.setString('seen_stories_v2:test', '{}');
+      await preferences.setInt('ml_status_v1:test', 100);
+      await db.isar.writeTxn(
+        () => db.isar.fileMls.put(
+          FileMl()
+            ..id = 10
+            ..scores = [.5],
+        ),
+      );
       await db.isar.writeTxn(
         () => db.isar.enteFiles.put(photo(10, DateTime(2020))),
       );
@@ -243,6 +328,8 @@ void main() {
       expect(await db.isar.enteFiles.count(), 0);
       expect(preferences.getString('session_master_key'), isNull);
       expect(preferences.getString('seen_stories_v2:test'), isNull);
+      expect(preferences.getInt('ml_status_v1:test'), isNull);
+      expect(await db.isar.fileMls.count(), 0);
       container.dispose();
     },
     skip: !Platform.isLinux,
@@ -426,6 +513,200 @@ void main() {
         sync.syncNextFilesPage(prioritizeRecent: false),
         throwsStateError,
       );
+    },
+    skip: !Platform.isLinux,
+  );
+  SemanticSyncService mlService(
+    _MlApi api, {
+    DateTime Function()? clock,
+    void Function(SemanticSyncState)? onState,
+  }) => SemanticSyncService(
+    api: api,
+    db: db,
+    crypto: _MlCrypto(),
+    preferences: preferences,
+    namespace: 'ml-test',
+    prompts: SemanticPrompts(
+      List.generate(semanticThemes.length + 1, (_) => List.filled(512, 0)),
+    ),
+    clock: clock,
+    onState: onState,
+  );
+  Map<String, dynamic> status(int id, int time, {String type = 'mldata'}) => {
+    'fileID': id,
+    'type': type,
+    'updatedAt': time,
+  };
+
+  test(
+    'ML status survives restart before its file arrives and metadata replay preserves scores',
+    () async {
+      await db.isar.writeTxn(
+        () => db.isar.enteFiles.put(photo(1, DateTime(2025))),
+      );
+      final api = _MlApi()..statuses.addAll([status(1, 10), status(2, 20)]);
+      await mlService(api).syncNextPage(limit: 1);
+      expect(
+        (await db.isar.fileMls.get(1))!.scores.length,
+        semanticThemes.length + 1,
+      );
+      expect((await db.isar.fileMls.get(2))!.hasFile, isFalse);
+      expect(preferences.getInt('ml_status_v1:ml-test'), 20);
+      await db.isar.close();
+      db = await IsarDb.open(directoryOverride: directory.path);
+      final filesSync = service(_Api());
+      await filesSync.syncCollections();
+      await drain(filesSync);
+      expect((await db.isar.fileMls.get(1))!.scores, isNotEmpty);
+      expect((await db.isar.fileMls.get(2))!.hasFile, isTrue);
+      await mlService(api).syncNextPage();
+      expect(api.fetched, [
+        [1],
+        [2],
+      ]);
+      expect(api.cursors.last, 20);
+      expect((await db.isar.fileMls.get(2))!.scores, isNotEmpty);
+    },
+    skip: !Platform.isLinux,
+  );
+
+  test(
+    'ML remote errors and pending indexes remain retryable after the status cursor advances',
+    () async {
+      await db.isar.writeTxn(
+        () => db.isar.enteFiles.putAll([
+          photo(1, DateTime(2025)),
+          photo(2, DateTime(2025)),
+        ]),
+      );
+      final api = _MlApi()
+        ..statuses.addAll([status(1, 10), status(2, 20)])
+        ..indexing.add(1)
+        ..errors.add(2);
+      var now = DateTime(2026, 11, 1);
+      final sync = mlService(api, clock: () => now);
+      expect((await sync.syncNextPage()).hasMore, isFalse);
+      expect((await db.isar.fileMls.get(1))!.issue, 'indexing');
+      expect((await db.isar.fileMls.get(2))!.issue, 'remote-error');
+      await sync.syncNextPage();
+      expect(api.fetched.length, 1);
+      now = now.add(const Duration(minutes: 6));
+      api.indexing.clear();
+      api.errors.clear();
+      await mlService(api, clock: () => now).syncNextPage();
+      expect(api.fetched.length, 2);
+      expect((await db.isar.fileMls.get(1))!.scores, isNotEmpty);
+      expect((await db.isar.fileMls.get(2))!.scores, isNotEmpty);
+    },
+    skip: !Platform.isLinux,
+  );
+
+  test(
+    'files without remote ML status are not polled and new status bypasses not-indexed cooldown',
+    () async {
+      await db.isar.writeTxn(
+        () => db.isar.enteFiles.putAll([
+          photo(1, DateTime(2025)),
+          photo(2, DateTime(2025)),
+          photo(3, DateTime(2025)),
+        ]),
+      );
+      final api = _MlApi()
+        ..statuses.addAll([status(1, 10), status(2, 20, type: 'vid-preview')])
+        ..missing.add(1);
+      final sync = mlService(api);
+      await sync.syncNextPage();
+      expect(api.fetched, [
+        [1],
+      ]);
+      sync.refresh();
+      await sync.syncNextPage();
+      expect(api.fetched.length, 1);
+      api.statuses.add(status(1, 30));
+      api.missing.clear();
+      sync.refresh();
+      await sync.syncNextPage();
+      expect(api.fetched, [
+        [1],
+        [1],
+      ]);
+      expect((await db.isar.fileMls.get(1))!.scores, isNotEmpty);
+    },
+    skip: !Platform.isLinux,
+  );
+
+  test(
+    'unsupported ML endpoint preserves cached scores and stalled status pages fail boundedly',
+    () async {
+      await db.isar.writeTxn(() async {
+        await db.isar.enteFiles.put(photo(1, DateTime(2025)));
+        await db.isar.fileMls.put(
+          FileMl()
+            ..id = 1
+            ..hasFile = true
+            ..promptRevision = semanticPromptRevision
+            ..pending = false
+            ..scores = List.filled(semanticThemes.length + 1, .4),
+        );
+      });
+      final states = <SemanticSyncState>[];
+      final api = _MlApi()..unavailable = true;
+      expect(
+        (await mlService(api, onState: states.add).syncNextPage()).hasMore,
+        isFalse,
+      );
+      expect(states.last, SemanticSyncState.unavailable);
+      expect((await db.isar.fileMls.get(1))!.scores, isNotEmpty);
+      api.unavailable = false;
+      api.stalled = true;
+      await expectLater(mlService(api).syncNextPage(), throwsStateError);
+      expect(preferences.getInt('ml_status_v1:ml-test'), isNull);
+    },
+    skip: !Platform.isLinux,
+  );
+
+  test(
+    'ML scores create reactive scene memories and disappear with the last album link',
+    () async {
+      final api = _Api();
+      final sync = service(api);
+      await sync.syncCollections();
+      await sync.syncNextFilesPage(prioritizeRecent: false);
+      await db.isar.writeTxn(
+        () => db.isar.fileMls.put(
+          FileMl()
+            ..id = 1
+            ..hasFile = true
+            ..scores = [.4],
+        ),
+      );
+      api.deleting = true;
+      await sync.syncNextFilesPage(prioritizeRecent: false);
+      expect(await db.isar.fileMls.get(1), isNull);
+      await db.isar.writeTxn(() async {
+        await db.isar.enteFiles.putAll(
+          List.generate(4, (i) => photo(i + 10, DateTime(2025, 1, i + 1))),
+        );
+        await db.isar.fileMls.putAll(
+          List.generate(
+            4,
+            (i) => FileMl()
+              ..id = i + 10
+              ..hasFile = true
+              ..promptRevision = semanticPromptRevision
+              ..scores = List.generate(
+                semanticThemes.length + 1,
+                (n) => n == 1 ? .5 : .1,
+              ),
+          ),
+        );
+      });
+      await MemoryMapper(db, clock: () => DateTime(2026, 11, 1)).rebuild();
+      final scenes = (await db.isar.memoryClusters.where().findAll())
+          .where((m) => m.signature.contains(':scene:'))
+          .toList();
+      expect(scenes.single.title, 'Work mode · 2025');
+      expect(scenes.single.fileIds, [10, 11, 12, 13]);
     },
     skip: !Platform.isLinux,
   );

@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../db/isar_db.dart';
 import '../db/models/ente_collection.dart';
 import '../db/models/ente_file.dart';
+import '../db/models/file_ml.dart';
 import '../db/models/person.dart';
 import '../network/ente_api.dart';
 import 'crypto_isolate.dart';
@@ -77,6 +78,7 @@ class SyncService {
             if (file.collectionKeys.isEmpty) {
               if (removed.contains(file.collectionID)) {
                 await _isar.enteFiles.delete(file.id);
+                await _isar.fileMls.delete(file.id);
               }
             } else if (file.collectionKeys.any(
               (k) => removed.contains(k.collectionID),
@@ -195,6 +197,16 @@ class SyncService {
           }
         }
         await _isar.enteFiles.putAll(updates);
+        final ml = await _isar.fileMls.getAll(
+          updates.map((f) => f.id).toList(),
+        );
+        await _isar.fileMls.putAll([
+          for (var i = 0; i < updates.length; i++)
+            (ml[i] ?? (FileMl()..id = updates[i].id))
+              ..hasFile = true
+              ..creationTime = updates[i].creationTime,
+        ]);
+        await _isar.fileMls.deleteAll(removals);
         deleted = await _isar.enteFiles.deleteAll(removals);
         inserted = updates.length;
       });
@@ -229,6 +241,7 @@ class SyncService {
   Future<void> _retainLinkedFile(EnteFile file) async {
     if (file.collectionKeys.isEmpty) {
       await _isar.enteFiles.delete(file.id);
+      await _isar.fileMls.delete(file.id);
     } else {
       _selectKey(file);
       await _isar.enteFiles.put(file);
@@ -244,9 +257,10 @@ class SyncService {
         .collectionKeysLengthEqualTo(0)
         .idProperty()
         .findAll();
-    final deleted = await _isar.writeTxn(
-      () => _isar.enteFiles.deleteAll(legacy),
-    );
+    final deleted = await _isar.writeTxn(() async {
+      await _isar.fileMls.deleteAll(legacy);
+      return _isar.enteFiles.deleteAll(legacy);
+    });
     _reconciled = true;
     return deleted;
   }

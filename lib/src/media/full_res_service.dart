@@ -262,7 +262,11 @@ class FullResService {
           onReceiveProgress: onProgress,
         );
       } on DioException catch (e) {
-        if (e.type == DioExceptionType.cancel) rethrow;
+        if (_disposed ||
+            token.isCancelled ||
+            e.type == DioExceptionType.cancel) {
+          rethrow;
+        }
         final lastAttempt = attempt >= _maxImageRetries - 1;
         if (lastAttempt || !EnteApi.isTransient(e)) rethrow;
         // Linear backoff: 0.5s, 1s. Keeps a rate-limited server from being

@@ -10,6 +10,10 @@ import 'package:entegram/src/db/isar_db.dart';
 import 'package:entegram/src/db/models/ente_file.dart';
 import 'package:entegram/src/db/models/memory_cluster.dart';
 import 'package:entegram/src/db/models/person.dart';
+import 'package:entegram/src/db/models/file_ml.dart';
+import 'package:entegram/src/ml/semantic_prompts.dart';
+import 'package:entegram/src/ml/semantic_sync.dart';
+import 'package:entegram/src/ml/semantic_catalog.dart';
 import 'package:entegram/src/media/full_res_service.dart';
 import 'package:entegram/src/media/thumbnail_service.dart';
 import 'package:entegram/src/memories/memory_catalog.dart';
@@ -93,6 +97,7 @@ void main() {
       Dio? transport;
       var phase = 'LOGIN';
       final uiOnly = Platform.environment['ENTE_TEST_UI_SMOKE'] == '1';
+      final mlSample = Platform.environment['ENTE_TEST_ML_SAMPLE'] == '1';
       SharedPreferences? livePreferences;
       EnteApi? liveApi;
       Session? liveSession;
@@ -236,7 +241,7 @@ void main() {
                   'SYNC_PROGRESS pages=${pages + 1} files=${await db!.isar.enteFiles.count()}',
                 );
               }
-              if (!progress.hasMore || (uiOnly && pages >= 4)) {
+              if (!progress.hasMore || ((uiOnly || mlSample) && pages >= 4)) {
                 finished = true;
                 break;
               }
@@ -248,7 +253,11 @@ void main() {
             );
             final files = await db!.isar.enteFiles.where().findAll();
             checkpoint(
-              '${uiOnly ? 'PARTIAL_ARCHIVE_UI_ONLY' : 'ARCHIVE_OK'} files=${files.length} pages=${pages + 1}',
+              '${mlSample
+                  ? 'ML_SAMPLE_ARCHIVE'
+                  : uiOnly
+                  ? 'PARTIAL_ARCHIVE_UI_ONLY'
+                  : 'ARCHIVE_OK'} files=${files.length} pages=${pages + 1}',
             );
             phase = 'ARCHIVE_MEMBERSHIPS';
             final expectedIds = memberships.entries
@@ -279,6 +288,56 @@ void main() {
             checkpoint(
               'ALBUM_KEYS_OK recovered=${actualIds.difference(oldSyncIds).length}',
             );
+            if (mlSample || !uiOnly) {
+              phase = 'ENTE_ML';
+              final semantic = SemanticSyncService(
+                api: api,
+                db: db!,
+                crypto: crypto!,
+                preferences: prefs,
+                namespace: 'live-check-only',
+                prompts: await SemanticPrompts.load(),
+                onState: (state) => checkpoint('ML_STATE ${state.name}'),
+              );
+              for (var page = 0; page < 16; page++) {
+                final progress = await semantic.syncNextPage(limit: 32);
+                if (!progress.hasMore) break;
+              }
+              final records = await db!.isar.fileMls
+                  .filter()
+                  .hasFileEqualTo(true)
+                  .findAll();
+              final ready = records
+                  .where((r) => r.scores.length == semanticThemes.length + 1)
+                  .toList();
+              final failed = records
+                  .where(
+                    (r) =>
+                        r.issue == 'decryption-failed' || r.issue == 'invalid',
+                  )
+                  .length;
+              final incompatible = records
+                  .where((r) => r.issue == 'incompatible')
+                  .length;
+              final counts = List.filled(semanticThemes.length, 0);
+              for (final record in ready) {
+                for (final index in matchingThemes(record.scores)) {
+                  counts[index]++;
+                }
+              }
+              checkpoint(
+                'ML_QUALIFYING total=${counts.fold<int>(0, (a, b) => a + b)} themes=${counts.where((c) => c >= 4).length}',
+              );
+              checkpoint(
+                'ML_SAMPLE indexed=${ready.length} failed=$failed incompatible=$incompatible',
+              );
+              expect(failed, 0, reason: 'LIVE_ML_DECRYPTION');
+              expect(
+                ready.every((r) => r.scores.every((s) => s.isFinite)),
+                isTrue,
+              );
+              semantic.dispose();
+            }
             phase = 'MEMORIES';
             await MemoryMapper(db!).rebuild();
             final memories = await db!.isar.memoryClusters.where().findAll();
@@ -301,7 +360,7 @@ void main() {
               }
             }
             checkpoint(
-              'MEMORIES_OK count=${memories.length} people=${await db!.isar.persons.count()}',
+              'MEMORIES_OK count=${memories.length} people=${await db!.isar.persons.count()} scenes=${memories.where((m) => m.category == MemoryCategory.scene).length}',
             );
             thumbs = ThumbnailService(
               api: api,
@@ -339,7 +398,7 @@ void main() {
             }
             if (files.isNotEmpty) expect(decoded, greaterThan(0));
             checkpoint('THUMBNAILS_OK decoded=$decoded');
-            if (!uiOnly) {
+            if (!uiOnly && !mlSample) {
               phase = 'ORIGINALS';
               var images = 0;
               final eligibleImages = files.where(
@@ -553,7 +612,13 @@ void main() {
         } else {
           checkpoint('MEMORY_UI_EMPTY_LIBRARY');
         }
-        checkpoint(uiOnly ? 'UI_SMOKE_COMPLETE' : 'LIVE_VERIFICATION_COMPLETE');
+        checkpoint(
+          mlSample
+              ? 'LIVE_ML_SAMPLE_COMPLETE'
+              : uiOnly
+              ? 'UI_SMOKE_COMPLETE'
+              : 'LIVE_VERIFICATION_COMPLETE',
+        );
       } catch (error) {
         if (error is DioException) {
           checkpoint(
@@ -565,6 +630,7 @@ void main() {
           for (final code in [
             'LIVE_COLLECTION_MEMBERSHIP_MISMATCH',
             'LIVE_KEY_MEMBERSHIPS',
+            'LIVE_ML_DECRYPTION',
             'LIVE_ACTIVE_KEY',
             'LIVE_GALLERY_IMAGE_NOT_PAINTED',
             'LIVE_STORY_ROUTE',
@@ -616,7 +682,10 @@ void main() {
         });
         // Let the gallery's deferred neighbour prefetch return after unmount.
         // Network/media cleanup above has already stopped its services.
-        await tester.pump(const Duration(seconds: 5));
+        // Network cancellation can settle one fake-clock turn after unmount.
+        for (var i = 0; i < 3; i++) {
+          await tester.pump(const Duration(seconds: 5));
+        }
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
             .setMockMethodCallHandler(
               const MethodChannel('plugins.flutter.io/path_provider'),

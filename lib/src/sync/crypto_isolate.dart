@@ -9,6 +9,7 @@ import '../db/models/ente_collection.dart';
 import '../db/models/ente_file.dart';
 import '../db/models/person.dart';
 import 'decrypt_ops.dart';
+import '../ml/ml_decoder.dart';
 
 /// Long-lived background isolate that owns all key material and performs every
 /// libsodium decryption off the main thread. The main isolate talks to it with
@@ -168,6 +169,13 @@ class CryptoIsolate {
           )
           as Uint8List;
 
+  Future<List<MlClassification>> classifyMlData(
+    List<EnteFile> files,
+    List<Map<String, dynamic>> entries,
+    List<List<double>> queries,
+  ) async => (await _send(_ClassifyMl(files, entries, queries)) as List)
+      .cast<MlClassification>();
+
   void dispose() {
     if (_disposed) return;
     _disposed = true;
@@ -199,6 +207,17 @@ class CryptoIsolate {
       try {
         final Object? result;
         switch (request) {
+          case _ClassifyMl(:final files, :final entries, :final queries):
+            final byId = {for (final file in files) file.id: file};
+            result = [
+              for (final entry in entries)
+                if (byId[entry['fileID']] case final EnteFile file)
+                  if (collectionKeys[file.collectionID]
+                      case final Uint8List key)
+                    decryptMlData(crypto, file, entry, key, queries)
+                  else
+                    MlClassification(file.id, issue: 'missing-key'),
+            ];
           case _DecryptCollections(:final raw):
             final out = <EnteCollection>[];
             for (final c in raw) {
@@ -440,4 +459,11 @@ class _IsolateError {
   _IsolateError(this.error, this.stack);
   final String error;
   final StackTrace stack;
+}
+
+class _ClassifyMl extends _Request {
+  const _ClassifyMl(this.files, this.entries, this.queries);
+  final List<EnteFile> files;
+  final List<Map<String, dynamic>> entries;
+  final List<List<double>> queries;
 }

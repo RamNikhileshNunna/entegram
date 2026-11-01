@@ -6,6 +6,7 @@ import '../memories/memory_catalog.dart';
 import '../providers.dart';
 import 'widgets/memory_card.dart';
 import 'widgets/stories_bar.dart';
+import 'widgets/ente_ml_info.dart';
 
 class FeedScreen extends ConsumerStatefulWidget {
   const FeedScreen({super.key});
@@ -25,6 +26,7 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
     'For you',
     'On this day',
     'People',
+    'Moods & settings',
     'Places',
     'Yearbooks',
   ];
@@ -78,6 +80,7 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
       m.category == MemoryCategory.onThisDay ||
           m.category == MemoryCategory.flashback,
     'People' => m.category == MemoryCategory.people,
+    'Moods & settings' => m.category == MemoryCategory.scene,
     'Places' => m.category == MemoryCategory.trip,
     'Yearbooks' =>
       m.category == MemoryCategory.year || m.category == MemoryCategory.season,
@@ -208,6 +211,11 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
                   ),
                 ),
               ),
+              if (_filter == 'Moods & settings')
+                SliverPadding(
+                  padding: EdgeInsets.symmetric(horizontal: inset + 4),
+                  sliver: const SliverToBoxAdapter(child: EnteMlInfo()),
+                ),
               if (bootstrap.hasError && memories.isNotEmpty)
                 SliverToBoxAdapter(
                   child: Padding(

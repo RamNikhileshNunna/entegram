@@ -3,6 +3,7 @@ import 'package:entegram/src/db/models/memory_cluster.dart';
 import 'package:entegram/src/providers.dart';
 import 'package:entegram/src/ui/feed_screen.dart';
 import 'package:entegram/src/ui/widgets/memory_card.dart';
+import 'package:entegram/src/ui/widgets/memory_collage.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -22,6 +23,9 @@ void main() {
   }) => ProviderScope(
     overrides: [
       sharedPreferencesProvider.overrideWithValue(preferences),
+      semanticCoverageProvider.overrideWith(
+        (_) => Stream.value(const SemanticCoverage(0, 12)),
+      ),
       thumbnailServiceProvider.overrideWithValue(null),
       fullResServiceProvider.overrideWithValue(null),
       namedPeopleProvider.overrideWith((_) => Stream.value([])),
@@ -44,6 +48,33 @@ void main() {
       ),
       home: const FeedScreen(),
     ),
+  );
+
+  testWidgets(
+    'mood filter shows scene collages and explains missing ML coverage',
+    (tester) async {
+      await tester.pumpWidget(
+        app(
+          Stream.value([
+            memory(1, signature: 'v2:scene:happy-hour:2025'),
+            memory(2, signature: 'v2:people:someone'),
+          ]),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 80));
+      await tester.ensureVisible(find.text('Moods & settings').first);
+      await tester.tap(find.text('Moods & settings').first);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 80));
+      expect(find.byType(MemoryCollage), findsOneWidget);
+      expect(
+        find.textContaining('Enable machine learning in Ente Photos'),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
   );
 
   testWidgets(

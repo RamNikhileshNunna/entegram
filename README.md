@@ -22,6 +22,7 @@ An Instagram-style **memories feed** and **stories viewer** for your [Ente Photo
 | **Curated memories feed** | A finite, varied selection with stable positions during sync, category filters, retryable pagination and phone/tablet layouts. |
 | **Daily memories** | Exact-date anniversaries across your full archive, calendar month flashbacks and recent highlights. |
 | **People** | Named-person highlights and co-occurrence-only pairs. Hidden people are excluded; the app does not guess who is “you.” |
+| **Ente ML themes** | Compatible Ente CLIP results power Happy hour, Work mode, Cozy cafés, celebrations and other visual themes, with collage previews and an ML coverage view. |
 | **Trips** | Away events with home confidence, return-home boundaries and bounded time windows. |
 | **Year & seasonal highlights** | Samples spread across dates, hemisphere-aware seasons, and neutral quarters when GPS is unavailable. |
 | **Stories** | Stable photo cards, per-account seen state, hold/manual/background pause, guarded async navigation and video-player-driven progress. |
@@ -33,7 +34,7 @@ An Instagram-style **memories feed** and **stories viewer** for your [Ente Photo
 | **Sign out** | Removes synced database content, per-account media caches, story state and sync cursors. |
 
 The curation and playback rewrite follows the daily-memory and highlight
-patterns of Immich and Google Photos using the metadata available locally.
+patterns of Immich and Google Photos using decrypted metadata and compatible Ente ML results. See [Ente ML themes and setup](docs/ENTE_ML.md).
 See [memory architecture, source review and tradeoffs](docs/MEMORIES.md) for
 precise algorithms and validation limits.
 
@@ -80,8 +81,9 @@ Tap the **Entegram logo on the login screen 7 times** to open the server dialog,
 lib/src/
 ├── auth/          Login, SRP key derivation, TOTP
 ├── crypto/        libsodium wrapper + on-device crypto isolate
-├── db/            Isar models — EnteFile, EnteCollection, Person, MemoryCluster
+├── db/            Isar models — EnteFile, EnteCollection, Person, FileMl, MemoryCluster
 ├── media/         ThumbnailService, FullResService (concurrency + retry + circuit breaker)
+├── ml/            Encrypted Ente CLIP sync, local theme scoring and public prompt vectors
 ├── memories/      MemoryEngine + MemoryMapper — local curation and stable persistence
 ├── network/       EnteApi (Dio REST client; CDN-worker vs. direct fetch)
 ├── sync/          SyncController, per-collection sinceTime cursors, ML data fetch
@@ -105,7 +107,7 @@ State is managed with **Riverpod 3.x** and persisted in **Isar Community**. Memo
 
 1. **Sync.** Recent-priority requests show useful photos quickly. Separate, persistent backfill cursors continue through the archive without skipping older files on restart.
 2. **Decrypt locally.** The existing crypto isolate decrypts metadata and media with your account’s keys.
-3. **Curate.** A worker groups exact anniversaries, people, trips, seasons, years and recent dates, then balances highlights and removes repetitive selections.
+3. **Curate.** A worker groups exact anniversaries, people, trips, seasons, years and recent dates, then balances highlights and removes repetitive selections. Existing Ente CLIP results add visual scene themes; photos without a compatible index keep the metadata-based memories.
 4. **Browse.** A responsive, unique feed and stable story rail show cached thumbnails; originals load on demand. Story playback respects loading, holds, zoom, lifecycle and explicit pause.
 
 ---

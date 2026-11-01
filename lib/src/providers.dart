@@ -13,6 +13,10 @@ import 'auth/auth_service.dart';
 import 'db/isar_db.dart';
 import 'db/models/ente_collection.dart';
 import 'db/models/ente_file.dart';
+import 'db/models/file_ml.dart';
+import 'ml/semantic_catalog.dart';
+import 'ml/semantic_prompts.dart';
+import 'ml/semantic_sync.dart';
 import 'db/models/memory_cluster.dart';
 import 'db/models/person.dart';
 import 'media/full_res_service.dart';
@@ -156,7 +160,8 @@ class SessionNotifier extends Notifier<Session?> {
             .where(
               (k) =>
                   k.startsWith('seen_stories_v2:') ||
-                  k.startsWith('files_cursor_'),
+                  k.startsWith('files_cursor_') ||
+                  k.startsWith('ml_status_'),
             )
             .toList()) {
       await prefs.remove(key);
@@ -168,6 +173,7 @@ class SessionNotifier extends Notifier<Session?> {
         await db.isar.enteCollections.clear();
         await db.isar.persons.clear();
         await db.isar.memoryClusters.clear();
+        await db.isar.fileMls.clear();
       });
     } finally {
       state = null;
@@ -390,6 +396,41 @@ final seenStoriesProvider = NotifierProvider<SeenStories, Map<String, String>>(
   SeenStories.new,
 );
 
+class SemanticStateNotifier extends Notifier<SemanticSyncState> {
+  @override
+  SemanticSyncState build() {
+    ref.watch(sessionProvider);
+    return SemanticSyncState.idle;
+  }
+
+  void update(SemanticSyncState value) => state = value;
+}
+
+final semanticSyncStateProvider =
+    NotifierProvider<SemanticStateNotifier, SemanticSyncState>(
+      SemanticStateNotifier.new,
+    );
+
+class SemanticCoverage {
+  const SemanticCoverage(this.indexed, this.total);
+  final int indexed;
+  final int total;
+}
+
+final semanticCoverageProvider = StreamProvider<SemanticCoverage>((ref) async* {
+  final db = await ref.watch(isarDbProvider.future);
+  await for (final _ in db.isar.fileMls.watchLazy(fireImmediately: true)) {
+    final total = await db.isar.enteFiles.count();
+    final indexed = await db.isar.fileMls
+        .filter()
+        .hasFileEqualTo(true)
+        .promptRevisionEqualTo(semanticPromptRevision)
+        .scoresLengthEqualTo(semanticThemes.length + 1)
+        .count();
+    yield SemanticCoverage(indexed, total);
+  }
+});
+
 /// Owns the decryption isolate + sync orchestration for the logged-in session.
 final syncControllerProvider = FutureProvider<SyncController?>((ref) async {
   final session = ref.watch(sessionProvider);
@@ -400,6 +441,11 @@ final syncControllerProvider = FutureProvider<SyncController?>((ref) async {
     db: db,
     session: session,
     preferences: ref.read(sharedPreferencesProvider),
+    onSemanticState: (value) {
+      if (ref.mounted) {
+        ref.read(semanticSyncStateProvider.notifier).update(value);
+      }
+    },
   );
   ref.onDispose(controller.dispose);
   await controller.init();
@@ -516,6 +562,7 @@ class SyncController {
     required IsarDb db,
     required Session session,
     required SharedPreferences preferences,
+    this.onSemanticState,
   }) : _api = api,
        _db = db,
        _session = session,
@@ -524,6 +571,8 @@ class SyncController {
   final IsarDb _db;
   final Session _session;
   final SharedPreferences _preferences;
+  final void Function(SemanticSyncState)? onSemanticState;
+  SemanticSyncService? _semantic;
   CryptoIsolate? _crypto;
   late SyncService _sync;
   late MemoryMapper _mapper;
@@ -568,6 +617,19 @@ class SyncController {
       cursorNamespace:
           '${_api.baseUrl}:${base64Url.encode(_session.publicKey)}',
     );
+    _semantic = SemanticSyncService(
+      api: _api,
+      db: _db,
+      crypto: crypto,
+      preferences: _preferences,
+      namespace: '${_api.baseUrl}:${base64Url.encode(_session.publicKey)}',
+      prompts: await SemanticPrompts.load(),
+      onState: onSemanticState,
+    );
+    if (_disposed) {
+      _semantic?.dispose();
+      return;
+    }
     _mapper = MemoryMapper(_db);
     final account = SHA256Digest().process(
       Uint8List.fromList(
@@ -609,6 +671,7 @@ class SyncController {
     if (_bootstrap != null) return _bootstrap!;
     final future = _serial(() async {
       // Offline/cached libraries get today's memories before any network wait.
+      _semantic?.refresh();
       await _mapper.rebuild();
       if (_disposed) return;
       await _sync.syncCollections();
@@ -635,6 +698,7 @@ class SyncController {
     _backgroundSyncRunning = true;
     var changed = false;
     var pages = 0;
+    var semanticPaused = false;
     var lastBuild = DateTime.now();
     try {
       await Future<void>.delayed(const Duration(seconds: 1));
@@ -642,6 +706,17 @@ class SyncController {
         final progress = await _serial(_sync.syncNextFilesPage);
         if (_disposed) break;
         changed = changed || progress.changedFiles > 0;
+        var mlMore = false;
+        if (!semanticPaused && _semantic != null) {
+          try {
+            final ml = await _serial(() => _semantic!.syncNextPage());
+            mlMore = ml.hasMore;
+            changed = changed || ml.changed > 0;
+          } catch (_) {
+            // Scene sync must never stop metadata/archive recovery.
+            semanticPaused = true;
+          }
+        }
         pages++;
         if (changed &&
             (pages % 6 == 0 ||
@@ -650,7 +725,7 @@ class SyncController {
           changed = false;
           lastBuild = DateTime.now();
         }
-        if (!progress.hasMore) break;
+        if (!progress.hasMore && !mlMore) break;
         await Future<void>.delayed(const Duration(milliseconds: 100));
       }
       if (!_disposed && changed) await _mapper.rebuild();
@@ -689,6 +764,7 @@ class SyncController {
       _thumbnails.dispose();
       _fullRes.dispose();
     }
+    _semantic?.dispose();
     _crypto?.dispose();
   }
 }

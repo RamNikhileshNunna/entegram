@@ -181,6 +181,7 @@ class ThumbnailService {
         encrypted = await _api.downloadThumbnail(file.id);
         break;
       } on DioException catch (e) {
+        if (_disposed) return null;
         if (attempt == _maxRetries - 1) rethrow;
         // Retry timeouts, dropped connections, and transient server errors
         // (429 rate-limit / 5xx) — common when many downloads briefly hit the

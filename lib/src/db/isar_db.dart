@@ -3,6 +3,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'models/ente_collection.dart';
 import 'models/ente_file.dart';
+import 'models/file_ml.dart';
 import 'models/memory_cluster.dart';
 import 'models/person.dart';
 
@@ -17,6 +18,7 @@ class IsarDb {
   static const List<CollectionSchema<dynamic>> schemas = [
     EnteCollectionSchema,
     EnteFileSchema,
+    FileMlSchema,
     PersonSchema,
     MemoryClusterSchema,
   ];

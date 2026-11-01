@@ -3,7 +3,7 @@
 Entegram now uses local, deterministic curation inspired by the daily memories,
 people/place groupings and highlight collections in Google Photos and Immich.
 It does not reproduce either product's proprietary models or visual ranking.
-All grouping uses metadata already decrypted from the user's Ente library.
+Grouping uses decrypted metadata and, when available, compatible encrypted CLIP results from the user's Ente library. See [Ente ML integration](ENTE_ML.md).
 
 ## Source review and resulting changes
 
@@ -70,10 +70,9 @@ Selection prefers specific/relevant collections, caps output at 80 memories and
 24 slides per memory, limits broad categories and photo reuse, and requires
 novel content for overlapping collections. Covers are distinct. Sampling spreads
 across capture dates; resolution, orientation and media type are modest cover
-heuristics. There are no face-confidence, aesthetic, CLIP or visual-near-duplicate
-scores in the available metadata, so the engine does not pretend to use them.
+heuristics. Scene memories use real Ente CLIP query scores. Face-confidence, aesthetic and visual-near-duplicate ranking are not implemented; content hashes and temporal spacing still provide deduplication.
 
-The UI distinguishes eight categories through the versioned signature while
+The UI distinguishes nine categories through the versioned signature while
 preserving the existing persisted three-value enum. Category round-robin and a
 stable daily hash diversify the story rail. Existing feed positions survive
 background updates; refresh deliberately recalculates the ordering. There is no
@@ -129,7 +128,7 @@ Isar integration tests use the dependency's bundled Linux library and are
 explicitly skipped on other platforms until their native test-library paths
 are configured.
 
-A real Ente account and photo library are needed to validate end-to-end sync,
+An opt-in checker uses a real Ente account and photo library to validate end-to-end sync,
 metadata completeness, codecs and native video behavior on a device. Cloud
 widget tests and an APK build do not establish device frame rates, video-codec
 support, iOS readiness or equality with Google Photos/Immich's ML results.
@@ -152,3 +151,5 @@ session. A missing completion marker or any failed checkpoint returns a nonzero
 exit code. This file is named `selfhost_live_check.dart` so ordinary `flutter
 test` never attempts an account login. Android hardware video playback still
 requires a device or emulator.
+
+Compatible CLIP data adds a **Moods & settings** category with 2×2 collage cards. The ML queue and its compact scores are stored in a new Isar collection; original image/face embeddings are not retained. Both the status cursor and scores are cleared on sign-out. Run `python3 tool/verify_selfhost.py --ml-sample` to verify a limited metadata and ML sample without downloading the full archive.

@@ -11,6 +11,7 @@ enum MemoryCategory {
   season,
   year,
   day,
+  scene,
 }
 
 extension MemoryPresentation on MemoryCluster {
@@ -30,6 +31,7 @@ extension MemoryPresentation on MemoryCluster {
       'recent' => MemoryCategory.recent,
       'season' => MemoryCategory.season,
       'year' => MemoryCategory.year,
+      'scene' => MemoryCategory.scene,
       _ => switch (kind) {
         MemoryKind.people => MemoryCategory.people,
         MemoryKind.onThisDay => MemoryCategory.flashback,
@@ -47,6 +49,7 @@ extension MemoryPresentation on MemoryCluster {
     MemoryCategory.season => 'Seasonal highlights',
     MemoryCategory.year => 'Your year in photos',
     MemoryCategory.day => 'A day to remember',
+    MemoryCategory.scene => 'Moods & settings',
   };
 
   /// A rebuild with unchanged slides must not make a watched story unread.
@@ -91,6 +94,7 @@ List<MemoryCluster> curateMemories(
   const order = [
     MemoryCategory.onThisDay,
     MemoryCategory.recent,
+    MemoryCategory.scene,
     MemoryCategory.trip,
     MemoryCategory.people,
     MemoryCategory.flashback,

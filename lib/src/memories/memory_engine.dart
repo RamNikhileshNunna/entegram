@@ -4,9 +4,10 @@ import '../db/models/ente_file.dart';
 import '../db/models/memory_cluster.dart';
 import '../db/models/person.dart';
 import 'memory_catalog.dart';
+import '../ml/semantic_catalog.dart';
 
-/// Metadata-only curation. No network, database, device-owner guesses, or
-/// claims of visual/semantic understanding. Safe to run in a worker isolate.
+/// Local curation from decrypted metadata and optional Ente CLIP theme scores.
+/// No network or guessed device-owner identity. Safe in a worker isolate.
 class MemoryEngine {
   MemoryEngine({required this.now, this.maxMemories = 80, this.maxSlides = 24});
 
@@ -15,7 +16,11 @@ class MemoryEngine {
   final int maxSlides;
   final _candidates = <_Candidate>[];
 
-  List<MemoryCluster> build(List<EnteFile> source, List<Person> persons) {
+  List<MemoryCluster> build(
+    List<EnteFile> source,
+    List<Person> persons, {
+    Map<int, List<double>> sceneScores = const {},
+  }) {
     _candidates.clear();
     if (maxMemories <= 0 || maxSlides <= 0) return [];
     final hiddenPeople = persons.where((p) => p.isHidden).toList();
@@ -135,6 +140,7 @@ class MemoryEngine {
       560,
     );
 
+    _scenes(files, aliases, sceneScores);
     _people(persons, byId, aliases);
     _trips(files);
     _seasons(files);
@@ -164,6 +170,64 @@ class MemoryEngine {
       );
     }
     return _select();
+  }
+
+  void _scenes(
+    List<EnteFile> files,
+    Map<int, int> aliases,
+    Map<int, List<double>> scores,
+  ) {
+    final byId = {for (final file in files) file.id: file};
+    final matches = <int, Map<int, double>>{};
+    for (final entry in scores.entries) {
+      final id = aliases[entry.key];
+      if (id == null || !byId.containsKey(id)) continue;
+      for (final theme in matchingThemes(entry.value)) {
+        final bucket = matches.putIfAbsent(theme, () => {});
+        bucket[id] = max(bucket[id] ?? -1, entry.value[theme]);
+      }
+    }
+    for (final entry in matches.entries) {
+      final years = <int, List<EnteFile>>{};
+      for (final id in entry.value.keys) {
+        final file = byId[id]!;
+        years.putIfAbsent(_date(file).year, () => []).add(file);
+      }
+      for (final year in years.entries) {
+        final ranked = year.value
+          ..sort((a, b) {
+            final rank = entry.value[b.id]!.compareTo(entry.value[a.id]!);
+            return rank != 0 ? rank : a.id.compareTo(b.id);
+          });
+        final selected = <EnteFile>[];
+        final dayCounts = <String, int>{};
+        for (final file in ranked) {
+          final day = _dayKey(_date(file));
+          if ((dayCounts[day] ?? 0) >= 4 ||
+              selected.any(
+                (other) =>
+                    (other.creationTime - file.creationTime).abs() <
+                    const Duration(seconds: 30).inMicroseconds,
+              )) {
+            continue;
+          }
+          selected.add(file);
+          dayCounts[day] = (dayCounts[day] ?? 0) + 1;
+          if (selected.length >= 64) break;
+        }
+        selected.sort(_chronological);
+        final theme = semanticThemes[entry.key];
+        _add(
+          'scene:${theme.id}:${year.key}',
+          '${theme.title} · ${year.key}',
+          MemoryKind.trip,
+          selected,
+          720,
+          minFiles: 4,
+          relevance: entry.value,
+        );
+      }
+    }
   }
 
   void _people(
@@ -346,10 +410,20 @@ class MemoryEngine {
     int priority, {
     int minFiles = 3,
     List<String> people = const [],
+    Map<int, double> relevance = const {},
   }) {
     if (files.length < minFiles) return;
     _candidates.add(
-      _Candidate(key, title, kind, List.of(files), priority, minFiles, people),
+      _Candidate(
+        key,
+        title,
+        kind,
+        List.of(files),
+        priority,
+        minFiles,
+        people,
+        relevance,
+      ),
     );
   }
 
@@ -373,6 +447,7 @@ class MemoryEngine {
         'day' => 20,
         'year' => 6,
         'season' => 8,
+        'scene' => 12,
         _ => 12,
       };
       if ((categoryCounts[type] ?? 0) >= cap) continue;
@@ -388,6 +463,10 @@ class MemoryEngine {
           .toList();
       if (coverOptions.isEmpty) continue;
       coverOptions.sort((a, b) {
+        final semantic = (candidate.relevance[b.id] ?? 0).compareTo(
+          candidate.relevance[a.id] ?? 0,
+        );
+        if (semantic != 0) return semantic;
         final quality = _quality(b).compareTo(_quality(a));
         return quality != 0 ? quality : a.id.compareTo(b.id);
       });
@@ -509,6 +588,7 @@ class _Candidate {
     this.priority,
     this.minFiles,
     this.people,
+    this.relevance,
   );
   final String key;
   final String title;
@@ -517,4 +597,5 @@ class _Candidate {
   final int priority;
   final int minFiles;
   final List<String> people;
+  final Map<int, double> relevance;
 }
