@@ -1,8 +1,5 @@
 name: Build & Release APK
 
-# Builds a release APK and publishes it as a GitHub Release.
-# Triggered by pushing a version tag (e.g. `v1.0.0`), or run manually from the
-# Actions tab. The release is published by the github-actions bot.
 on:
   push:
     tags:
@@ -10,28 +7,52 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to create (e.g. v0.0.1)'
+        description: 'Existing version tag to build (e.g. v0.0.3)'
         required: true
-        default: 'v0.0.1'
+        default: 'v0.0.3'
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      TZ: America/New_York
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Resolve release tag
+      - name: Validate release tag
         id: meta
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Invalid release tag'; exit 1; }
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the tagged source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.meta.outputs.tag }}
+
+      - name: Verify source version and prevent release replacement
+        id: source
+        env:
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(sed -n 's/^version: //p' pubspec.yaml)
+          [[ "v${version%%+*}" == "$RELEASE_TAG" ]] || { echo 'Tag and app version differ'; exit 1; }
+          if response=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" 2>&1); then
+            echo 'Release already exists; refusing to replace its artifacts.'
+            exit 1
+          elif [[ "$response" != *'HTTP 404'* ]]; then
+            echo 'Could not verify release availability.'
+            exit 1
           fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -46,31 +67,45 @@ jobs:
           flutter-version: 3.44.1
           cache: true
 
+      - name: Install native crypto test library
+        run: sudo apt-get update && sudo apt-get install -y libsodium-dev
+
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Build release APK
-        run: flutter build apk --release
+      - name: Analyze and test
+        run: |
+          flutter analyze --no-pub
+          flutter test --no-pub --reporter expanded
 
-      - name: Stage APK
+      - name: Build release APK
+        run: flutter build apk --release --no-pub
+
+      - name: Stage APK and checksum
+        env:
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
         run: |
           mkdir -p dist
-          cp build/app/outputs/flutter-apk/app-release.apk \
-             "dist/entegram-${{ steps.meta.outputs.tag }}.apk"
+          cp build/app/outputs/flutter-apk/app-release.apk "dist/entegram-$RELEASE_TAG.apk"
+          cd dist
+          sha256sum "entegram-$RELEASE_TAG.apk" > SHA256SUMS.txt
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
+          target_commitish: ${{ steps.source.outputs.sha }}
           name: Entegram ${{ steps.meta.outputs.tag }}
-          files: dist/*.apk
+          files: |
+            dist/*.apk
+            dist/SHA256SUMS.txt
+          overwrite_files: false
           fail_on_unmatched_files: true
           body: |
-            Instagram-style memories feed & stories viewer for Ente Photos.
+            Ente Photos memories, stories and a responsive feed, with local Ente ML scene themes and collage previews.
 
-            **Install:** download the `.apk` below onto an Android device and open
-            it (you may need to allow "install from unknown sources").
+            **Moods & settings:** Happy hour, Work mode, Cozy cafés, celebrations, golden hour and other visual themes reuse compatible Ente CLIP results. Enable machine learning in Ente Photos and let its encrypted index sync first. These are approximate visual themes, not emotion or occupation assessments.
 
-            > This build is signed with Flutter's debug key, not a production
-            > release key — fine for personal/sideload use. Uninstall any prior
-            > debug-signed build first if Android refuses to update in place.
+            **Install:** download the APK and open it on Android. This is a development-signed build; uninstall an older build first if Android rejects the signing certificate. Your Ente cloud library remains on the server.
+
+            The APK and SHA256SUMS.txt were built together from tagged source commit `${{ steps.source.outputs.sha }}` after analysis and automated tests passed. Physical-device playback and performance have not been validated by this workflow.
