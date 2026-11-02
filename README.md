@@ -65,6 +65,10 @@ dart run build_runner build --delete-conflicting-outputs
 flutter run
 ```
 
+### Release signing
+
+Official updates reuse the original v0.0.2 signing certificate. Release builds require the persistent keystore; there is no random debug-key fallback. See [signing configuration](docs/SIGNING.md). `flutter run` debug builds remain available without release credentials.
+
 ### Sign in
 
 Use your normal Ente email and password (plus a TOTP code if you have 2FA enabled). The app **never stores your password** — it derives your master key locally with Argon2id, exactly the way the official app does, then discards the password.

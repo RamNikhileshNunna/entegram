@@ -47,3 +47,11 @@ app.*.map.json
 
 # Local machine config — contains absolute SDK paths, never commit
 android/local.properties
+
+# Android signing material stays outside the source repository.
+*.keystore
+*.jks
+*.p12
+*.pfx
+key.properties
+keystore.properties

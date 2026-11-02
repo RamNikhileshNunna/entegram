@@ -4,6 +4,18 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+// Release identity must be explicitly supplied. Never create a random debug
+// key for a published update: Android would reject it over existing installs.
+val releaseStorePath = System.getenv("ENTEGRAM_KEYSTORE_PATH")
+val releaseStorePassword = System.getenv("ENTEGRAM_KEYSTORE_PASSWORD")
+val releaseKeyAlias = System.getenv("ENTEGRAM_KEY_ALIAS") ?: "androiddebugkey"
+val releaseKeyPassword = System.getenv("ENTEGRAM_KEY_PASSWORD") ?: releaseStorePassword
+val hasReleaseSigning = !releaseStorePath.isNullOrBlank() && !releaseStorePassword.isNullOrBlank()
+val requestsRelease = gradle.startParameter.taskNames.any { it.contains("release", ignoreCase = true) }
+if (requestsRelease && !hasReleaseSigning) {
+    throw GradleException("Release signing requires ENTEGRAM_KEYSTORE_PATH and ENTEGRAM_KEYSTORE_PASSWORD. See docs/SIGNING.md.")
+}
+
 android {
     namespace = "com.entegram.entegram"
     compileSdk = flutter.compileSdkVersion
@@ -25,11 +37,20 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("persistentRelease") {
+                storeFile = file(releaseStorePath!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (hasReleaseSigning) signingConfigs.getByName("persistentRelease") else null
         }
     }
 }

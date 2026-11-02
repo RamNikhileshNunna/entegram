@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing version tag to build (e.g. v0.0.3)'
+        description: 'Existing version tag to build (e.g. v0.0.4)'
         required: true
-        default: 'v0.0.3'
+        default: 'v0.0.4'
 
 permissions:
   contents: write
@@ -54,6 +54,19 @@ jobs:
           fi
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+      - name: Check persistent signing availability
+        id: signing_available
+        env:
+          SIGNING_KEYSTORE: ${{ secrets.ENTEGRAM_ANDROID_KEYSTORE_BASE64 }}
+          SIGNING_PASSWORD: ${{ secrets.ENTEGRAM_ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          if [[ -n "$SIGNING_KEYSTORE" && -n "$SIGNING_PASSWORD" ]]; then
+            echo 'enabled=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'enabled=false' >> "$GITHUB_OUTPUT"
+            echo 'Signing secrets are missing. Analysis and tests will run; APK build/publication are skipped rather than using a new key.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
@@ -78,10 +91,26 @@ jobs:
           flutter analyze --no-pub
           flutter test --no-pub --reporter expanded
 
+      - name: Restore the persistent v0.0.2 signing key
+        if: steps.signing_available.outputs.enabled == 'true'
+        id: signing
+        env:
+          ENTEGRAM_KEYSTORE_BASE64: ${{ secrets.ENTEGRAM_ANDROID_KEYSTORE_BASE64 }}
+          ENTEGRAM_KEYSTORE_PASSWORD: ${{ secrets.ENTEGRAM_ANDROID_KEYSTORE_PASSWORD }}
+        run: python3 tool/signing.py prepare
+
       - name: Build release APK
+        if: steps.signing_available.outputs.enabled == 'true'
+        env:
+          ENTEGRAM_KEYSTORE_PASSWORD: ${{ secrets.ENTEGRAM_ANDROID_KEYSTORE_PASSWORD }}
         run: flutter build apk --release --no-pub
 
+      - name: Verify the APK signing identity
+        if: steps.signing_available.outputs.enabled == 'true'
+        run: python3 tool/signing.py verify-apk build/app/outputs/flutter-apk/app-release.apk
+
       - name: Stage APK and checksum
+        if: steps.signing_available.outputs.enabled == 'true'
         env:
           RELEASE_TAG: ${{ steps.meta.outputs.tag }}
         run: |
@@ -91,6 +120,7 @@ jobs:
           sha256sum "entegram-$RELEASE_TAG.apk" > SHA256SUMS.txt
 
       - name: Publish GitHub Release
+        if: steps.signing_available.outputs.enabled == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
@@ -106,6 +136,10 @@ jobs:
 
             **Moods & settings:** Happy hour, Work mode, Cozy cafés, celebrations, golden hour and other visual themes reuse compatible Ente CLIP results. Enable machine learning in Ente Photos and let its encrypted index sync first. These are approximate visual themes, not emotion or occupation assessments.
 
-            **Install:** download the APK and open it on Android. This is a development-signed build; uninstall an older build first if Android rejects the signing certificate. Your Ente cloud library remains on the server.
+            **Install over v0.0.2:** this APK reuses the original v0.0.2 signing key, so Android can update that installation while preserving local app data. No uninstall is needed for the original v0.0.2 build.
 
             The APK and SHA256SUMS.txt were built together from tagged source commit `${{ steps.source.outputs.sha }}` after analysis and automated tests passed. Physical-device playback and performance have not been validated by this workflow.
+
+      - name: Remove the temporary signing key
+        if: always()
+        run: rm -rf "${RUNNER_TEMP:?}/entegram-signing"
